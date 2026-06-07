@@ -1,4 +1,3 @@
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
 
@@ -53,8 +52,9 @@ def _ellipse_mask(h: int, w: int, scale_x: float, scale_y: float,
     return cv2.GaussianBlur(mask, (k, k), 0).astype(np.float32) / 255.0
 
 
-def _open_mouth_rgba(mouth_crop: np.ndarray, mouth_type: int) -> np.ndarray:
-    if _REMBG_AVAILABLE:
+def _open_mouth_rgba(mouth_crop: np.ndarray, mouth_type: int,
+                     use_rembg: bool = False) -> np.ndarray:
+    if use_rembg and _REMBG_AVAILABLE:
         rembg_rgba = np.array(
             _rembg_remove(Image.fromarray(mouth_crop)).convert("RGBA"), dtype=np.uint8)
         rembg_alpha = rembg_rgba[:, :, 3].astype(np.float32) / 255.0
@@ -139,7 +139,8 @@ def _detect_mouth(face_np: np.ndarray,
                   conf_mouth: float,
                   mouth_type: int = 0,
                   mouth_padding_per_type: Dict[int, int] = None,
-                  mouth_brightness_per_type: Dict[int, float] = None) -> Optional[Tuple[np.ndarray, int, int, int, int]]:
+                  mouth_brightness_per_type: Dict[int, float] = None,
+                  use_rembg: bool = False) -> Optional[Tuple[np.ndarray, int, int, int, int]]:
     """
     Detecta a boca na face gerada, faz rembg e devolve
     (rgba, abs_x, abs_y, abs_w, abs_h) ou None.
@@ -251,7 +252,7 @@ def _detect_mouth(face_np: np.ndarray,
         # ── half_open / fully_open: combina YOLO + rembg + máscara de cor ───
         # O rembg sozinho às vezes preserva pele ao redor dos lábios; a máscara
         # abaixo restringe o alpha a regiões escuras/coloridas típicas da boca.
-        mouth_rgba = _open_mouth_rgba(mouth_crop, mouth_type)
+        mouth_rgba = _open_mouth_rgba(mouth_crop, mouth_type, use_rembg=use_rembg)
 
     del mouth_crop
 
@@ -420,7 +421,8 @@ def process_single(q: int,
                    upscale_crop_face: float,
                    conf_mouth: float,
                    mouth_padding_per_type: Dict[int, int] = None,
-                   mouth_brightness_per_type: Dict[int, float] = None) -> None:
+                   mouth_brightness_per_type: Dict[int, float] = None,
+                   use_rembg: bool = False) -> None:
     mt        = mouth_types[q]
     meta      = store.load_face_frame_meta(q)
     fg        = int(meta.get("face_group", 0))
@@ -445,7 +447,8 @@ def process_single(q: int,
                            detection_model, upscale_crop_face, conf_mouth,
                            mouth_type=mt,
                            mouth_padding_per_type=mouth_padding_per_type,
-                           mouth_brightness_per_type=mouth_brightness_per_type)
+                           mouth_brightness_per_type=mouth_brightness_per_type,
+                           use_rembg=use_rembg)
 
     if result is None:
         store.save_mouth_frame(q, np.zeros((4, 4, 4), dtype=np.uint8), 0, 0, 0, 0)
@@ -455,36 +458,44 @@ def process_single(q: int,
     if q % 20 == 0:
         print(f"  [F2] Boca {MOUTH_TYPE_NAMES[mt]} fg={fg} frame{q} "
               f"→ ({result[1]},{result[2]}) {result[3]}×{result[4]}px")
-    cuda_cleanup()
 
 
-def _worker(q: int, store: DiskStore, mouth_types: List[int],
-            detection_model_path: str, bbox_cache: Dict,
-            bbox_cache_lock: threading.Lock,
-            upscale_crop_face: float, conf_mouth: float,
-            mouth_padding_per_type: Dict[int, int] = None,
-            mouth_brightness_per_type: Dict[int, float] = None) -> int:
+def _worker_batch(worker_id: int,
+                  indices: List[int],
+                  store: DiskStore,
+                  mouth_types: List[int],
+                  detection_model_path: str,
+                  upscale_crop_face: float,
+                  conf_mouth: float,
+                  mouth_padding_per_type: Dict[int, int] = None,
+                  mouth_brightness_per_type: Dict[int, float] = None,
+                  use_rembg: bool = False) -> int:
     from ultralytics import YOLO
+    completed = 0
+    model = None
     try:
         model = YOLO(detection_model_path)
         local: Dict = {}
-        process_single(q, store, mouth_types, model, local,
-                       upscale_crop_face, conf_mouth,
-                       mouth_padding_per_type, mouth_brightness_per_type)
-        del model
-        with bbox_cache_lock:
-            for k, v in local.items():
-                if k not in bbox_cache:
-                    bbox_cache[k] = v
-        cuda_cleanup()
-        return q
-    except Exception as exc:
-        print(f"[F2-Worker] Erro frame {q}: {exc}")
+        for q in indices:
+            try:
+                process_single(q, store, mouth_types, model, local,
+                               upscale_crop_face, conf_mouth,
+                               mouth_padding_per_type, mouth_brightness_per_type,
+                               use_rembg=use_rembg)
+            except Exception as exc:
+                print(f"[F2-W{worker_id}] Erro frame {q}: {exc}")
+                try:
+                    store.save_mouth_frame(q, np.zeros((4, 4, 4), dtype=np.uint8), 0, 0, 0, 0)
+                except Exception:
+                    pass
+            completed += 1
+        return completed
+    finally:
         try:
-            store.save_mouth_frame(q, np.zeros((4, 4, 4), dtype=np.uint8), 0, 0, 0, 0)
+            del model
         except Exception:
             pass
-        return -1
+        cuda_cleanup()
 
 
 def run_phase2(store: DiskStore,
@@ -495,29 +506,37 @@ def run_phase2(store: DiskStore,
                upscale_crop_face: float = 2.0,
                conf_mouth: float = 0.1,
                mouth_padding_per_type: Dict[int, int] = None,
-               mouth_brightness_per_type: Dict[int, float] = None) -> None:
-    if not _REMBG_AVAILABLE:
+               mouth_brightness_per_type: Dict[int, float] = None,
+               use_rembg: bool = False) -> None:
+    n_workers = max(1, n_workers)
+    if use_rembg and not _REMBG_AVAILABLE:
         print("[F2] rembg não disponível; usando máscara YOLO/cor para recorte de boca.")
 
     print(f"\n[F2] Bocas por frame estabilizadas — modelo unico face+boca, {n_frames} frames, {n_workers} workers, "
           f"upscale=auto(min={upscale_crop_face:.1f}x) conf={conf_mouth} "
-          f"padding={mouth_padding_per_type} brightness={mouth_brightness_per_type}...")
+          f"padding={mouth_padding_per_type} brightness={mouth_brightness_per_type} "
+          f"rembg={'on' if use_rembg and _REMBG_AVAILABLE else 'off'}...")
 
-    bbox_cache: Dict = {}
-    lock = threading.Lock()
+    chunks = [list(range(i, n_frames, n_workers)) for i in range(n_workers)]
+    chunks = [chunk for chunk in chunks if chunk]
+    completed = 0
+    log_step = max(1, n_frames // 10)
 
-    with ThreadPoolExecutor(max_workers=n_workers) as ex:
+    with ThreadPoolExecutor(max_workers=len(chunks)) as ex:
         futures = {
-            ex.submit(_worker, q, store, mouth_types, detection_model_path,
-                      bbox_cache, lock, upscale_crop_face, conf_mouth,
-                      mouth_padding_per_type, mouth_brightness_per_type): q
-            for q in range(n_frames)
+            ex.submit(_worker_batch, worker_id, chunk, store, mouth_types,
+                      detection_model_path, upscale_crop_face, conf_mouth,
+                      mouth_padding_per_type, mouth_brightness_per_type,
+                      use_rembg): worker_id
+            for worker_id, chunk in enumerate(chunks)
         }
         for future in as_completed(futures):
             try:
-                future.result()
+                completed += future.result()
             except Exception as e:
-                print(f"[F2] EXCEÇÃO: {e}")
+                print(f"[F2] Worker falhou: {e}")
+            if completed % log_step == 0 or completed == n_frames:
+                print(f"[F2] {completed}/{n_frames} detectados")
 
     smooth_mouth_tracks(store, mouth_types, n_frames)
 

@@ -36,7 +36,7 @@ from .utils import (
 from .phase0 import run_phase0
 from .character_detect import build_character_bboxes
 from .phase1 import run_phase1
-from .phase2 import run_phase2, smooth_mouth_tracks, _REMBG_AVAILABLE
+from .phase2 import run_phase2, smooth_mouth_tracks
 from .phase3 import run_phase3, launch_overlap_workers, ensure_all_outputs
 
 
@@ -83,6 +83,7 @@ class LipSyncZTurboPipeline:
                 "vram_safety_margin_mb": ("INT",     {"default": 1024, "min": 256,  "max": 16384, "step": 256}),
                 "compose_feather_px":    ("INT",     {"default": 2,    "min": 0,    "max": 32}),
                 "enable_overlap":        ("BOOLEAN", {"default": True}),
+                "use_rembg":             ("BOOLEAN", {"default": False, "tooltip": "Ativa rembg no recorte de bocas abertas. Mais preciso em alguns casos, porém mais lento."}),
                 "upscale_crop_face":     ("FLOAT",   {"default": 2.0,  "min": 1.0,  "max": 10.0,  "step": 0.5}),
                 "mouth_conf":            ("FLOAT",   {"default": 0.1,  "min": 0.01, "max": 1.0,   "step": 0.01}),
                 "remove_mouth":          ("BOOLEAN", {"default": True}),
@@ -174,6 +175,7 @@ class LipSyncZTurboPipeline:
         vram_safety_margin_mb: int = 1024,
         compose_feather_px: int = 2,
         enable_overlap: bool = True,
+        use_rembg: bool = False,
         upscale_crop_face: float = 2.0,
         mouth_conf: float = 0.1,
         remove_mouth: bool = True,
@@ -315,7 +317,7 @@ class LipSyncZTurboPipeline:
             )
 
             # ── Fase 1 (+ overlap) ────────────────────────────────────────────
-            if enable_overlap and _REMBG_AVAILABLE:
+            if enable_overlap:
                 ready_queue     = Queue()
                 canonical_cache: Dict = {}
 
@@ -325,6 +327,7 @@ class LipSyncZTurboPipeline:
                     vram_safety_margin_mb, upscale_crop_face, mouth_conf,
                     mouth_padding_per_type=mouth_padding_per_type,
                     mouth_brightness_per_type=mouth_brightness_per_type,
+                    use_rembg=use_rembg,
                 )
 
                 with torch.inference_mode():
@@ -373,6 +376,7 @@ class LipSyncZTurboPipeline:
                     n_workers_f2, upscale_crop_face, mouth_conf,
                     mouth_padding_per_type=mouth_padding_per_type,
                     mouth_brightness_per_type=mouth_brightness_per_type,
+                    use_rembg=use_rembg,
                 )
 
                 n_workers_f3 = compute_workers(vram_safety_margin_mb)

@@ -9,7 +9,7 @@ import torch
 
 from .constants import _QUEUE_SENTINEL, _MAX_WORKERS, _VRAM_PER_WORKER_MB
 from .store import DiskStore
-from .phase2 import process_single, _REMBG_AVAILABLE
+from .phase2 import process_single
 from .utils import cuda_cleanup, vram_free_mb, vram_info
 
 
@@ -130,7 +130,8 @@ def _overlap_worker(worker_id: int,
                     upscale_crop_face: float,
                     conf_mouth: float,
                     mouth_padding_per_type: Dict = None,
-                    mouth_brightness_per_type: Dict = None) -> None:
+                    mouth_brightness_per_type: Dict = None,
+                    use_rembg: bool = False) -> None:
     from ultralytics import YOLO
     try:
         detection_model = YOLO(detection_model_path)
@@ -152,7 +153,8 @@ def _overlap_worker(worker_id: int,
             local: Dict = {}
             process_single(q, store, mouth_types, detection_model, local,
                            upscale_crop_face, conf_mouth,
-                           mouth_padding_per_type, mouth_brightness_per_type)
+                           mouth_padding_per_type, mouth_brightness_per_type,
+                           use_rembg=use_rembg)
 
             compose_frame(q, store, feather_px)
 
@@ -187,12 +189,9 @@ def launch_overlap_workers(ready_queue: Queue,
                             upscale_crop_face: float = 2.0,
                             conf_mouth: float = 0.1,
                             mouth_padding_per_type: Dict = None,
-                            mouth_brightness_per_type: Dict = None
+                            mouth_brightness_per_type: Dict = None,
+                            use_rembg: bool = False
                             ) -> Tuple[List[threading.Thread], threading.Event]:
-    if not _REMBG_AVAILABLE:
-        print("[Overlap] rembg não disponível, overlap desativado.")
-        return [], threading.Event()
-
     import os
     n_workers = max(1, min(
         (os.cpu_count() or 2) // 2,
@@ -201,7 +200,8 @@ def launch_overlap_workers(ready_queue: Queue,
     ))
     print(f"[Overlap] Lançando {n_workers} workers com YOLO unico "
           f"(upscale=auto(min={upscale_crop_face:.1f}x) conf={conf_mouth} "
-          f"padding={mouth_padding_per_type} brightness={mouth_brightness_per_type})...")
+          f"padding={mouth_padding_per_type} brightness={mouth_brightness_per_type} "
+          f"rembg={'on' if use_rembg else 'off'})...")
 
     stop_event    = threading.Event()
     cache_lock    = threading.Lock()
@@ -216,7 +216,8 @@ def launch_overlap_workers(ready_queue: Queue,
                   feather_px, canonical_cache, cache_lock,
                   stop_event, processed_ctr, counter_lock,
                   upscale_crop_face, conf_mouth,
-                  mouth_padding_per_type, mouth_brightness_per_type),
+                  mouth_padding_per_type, mouth_brightness_per_type,
+                  use_rembg),
             daemon=True, name=f"overlap-{i}",
         )
         t.start()

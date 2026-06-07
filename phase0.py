@@ -92,7 +92,7 @@ def _best_mouth_inside_face(xyxy, confs, classes, face_bbox):
 def preprocess_frame(
     idx: int,
     store: DiskStore,
-    detection_model_path: str,
+    detection_model,
     guard: VramGuard,
     mask_dilation: int,
     mask_blur: int,
@@ -140,8 +140,6 @@ def preprocess_frame(
             sH, sW = search_img.shape[:2]
 
             if sH > 0 and sW > 0:
-                from ultralytics import YOLO
-                detection_model = YOLO(detection_model_path)
                 conf_detect = min(conf_face, conf_mouth)
                 xyxy_d, confs_d, classes_d = _run_yolo(
                     detection_model, search_img, conf_detect)
@@ -224,7 +222,7 @@ def preprocess_frame(
 
                         del face_crop
 
-                del detection_model, xyxy_d, confs_d, classes_d
+                del xyxy_d, confs_d, classes_d
 
             fmask_np = np.zeros((H, W), dtype=np.uint8)
             if face_bbox_m is not None:
@@ -252,9 +250,57 @@ def preprocess_frame(
                 raise
         finally:
             guard.release()
-            cuda_cleanup()
 
     raise RuntimeError(f"Frame {idx}: retries esgotados. {last_exc}")
+
+
+def _preprocess_worker(
+    worker_id: int,
+    indices: List[int],
+    store: DiskStore,
+    detection_model_path: str,
+    guard: VramGuard,
+    mask_dilation: int,
+    mask_blur: int,
+    remove_mouth: bool,
+    upscale_crop_face: float,
+    conf_face: float,
+    conf_mouth: float,
+    face_margin: float,
+    character_bboxes: Optional[Dict[int, Optional[Tuple[int, int, int, int]]]] = None,
+) -> int:
+    from ultralytics import YOLO
+
+    detection_model = YOLO(detection_model_path)
+    completed = 0
+    char_mode = bool(character_bboxes)
+    try:
+        for idx in indices:
+            try:
+                preprocess_frame(
+                    idx, store, detection_model, guard,
+                    mask_dilation, mask_blur,
+                    remove_mouth, upscale_crop_face,
+                    conf_face, conf_mouth, face_margin,
+                    character_bboxes.get(idx) if char_mode else None,
+                )
+            except Exception as exc:
+                print(f"[F0-W{worker_id}] FALLBACK frame {idx}: {exc}")
+                try:
+                    orig = store.load_orig(idx)
+                    store.save_nomouth(idx, orig)
+                    store.save_mmask(idx, np.zeros(orig.shape[:2], dtype=np.uint8))
+                    store.save_fmask(idx, np.zeros(orig.shape[:2], dtype=np.uint8))
+                except Exception as fallback_exc:
+                    print(f"[F0-W{worker_id}] Fallback falhou frame {idx}: {fallback_exc}")
+            completed += 1
+        return completed
+    finally:
+        try:
+            del detection_model
+        except Exception:
+            pass
+        cuda_cleanup()
 
 
 def run_phase0(
@@ -277,6 +323,7 @@ def run_phase0(
     """
     from .constants import _VRAM_PER_WORKER_MB
 
+    n_workers = max(1, n_workers)
     guard    = VramGuard(n_workers, vram_safety_mb, _VRAM_PER_WORKER_MB)
     log_step = max(1, n_frames // 10)
     completed = 0
@@ -287,30 +334,26 @@ def run_phase0(
           f"upscale=auto(min={upscale_crop_face:.1f}x, alvo={_TARGET_SIDE_PX}px) conf={mouth_conf}"
           + (" [modo personagem Florence-2]" if char_mode else "") + "...")
 
-    with ThreadPoolExecutor(max_workers=n_workers) as ex:
+    chunks = [list(range(i, n_frames, n_workers)) for i in range(n_workers)]
+    chunks = [chunk for chunk in chunks if chunk]
+
+    with ThreadPoolExecutor(max_workers=len(chunks)) as ex:
         futures = {
             ex.submit(
-                preprocess_frame, i, store,
-                detection_model_path,
+                _preprocess_worker, worker_id, chunk, store, detection_model_path,
                 guard, mask_dilation, mask_blur,
                 remove_mouth, upscale_crop_face,
                 0.25, mouth_conf,
                 0.10,
-                character_bboxes.get(i) if char_mode else None,
-            ): i
-            for i in range(n_frames)
+                character_bboxes if char_mode else None,
+            ): worker_id
+            for worker_id, chunk in enumerate(chunks)
         }
         for future in as_completed(futures):
-            orig_idx = futures[future]
             try:
-                future.result()
+                completed += future.result()
             except Exception as exc:
-                print(f"[F0] FALLBACK frame {orig_idx}: {exc}")
-                orig = store.load_orig(orig_idx)
-                store.save_nomouth(orig_idx, orig)
-                store.save_mmask(orig_idx, np.zeros(orig.shape[:2], dtype=np.uint8))
-                store.save_fmask(orig_idx, np.zeros(orig.shape[:2], dtype=np.uint8))
-            completed += 1
+                print(f"[F0] Worker falhou: {exc}")
             if completed % log_step == 0 or completed == n_frames:
                 print(f"[F0] {completed}/{n_frames} | {vram_info()}")
 
