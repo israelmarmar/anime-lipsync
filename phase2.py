@@ -97,6 +97,39 @@ def _open_mouth_rgba(mouth_crop: np.ndarray, mouth_type: int) -> np.ndarray:
     return np.dstack([rgb, (alpha * 255).astype(np.uint8)])
 
 
+def _face_motion_signature(img_np: np.ndarray, face_bbox) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    if face_bbox is None:
+        return None
+    x1, y1, x2, y2 = face_bbox
+    crop = img_np[y1:y2, x1:x2]
+    if crop.size == 0:
+        return None
+
+    crop = cv2.resize(crop, (128, 128), interpolation=cv2.INTER_AREA)
+    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    edges = cv2.Canny(gray, 40, 120)
+
+    mask = np.ones((128, 128), dtype=np.uint8) * 255
+    # Ignora a regiao central inferior, onde a boca original pode variar.
+    mask[70:118, 32:96] = 0
+    gray = cv2.bitwise_and(gray, gray, mask=mask)
+    edges = cv2.bitwise_and(edges, edges, mask=mask)
+    return gray, edges
+
+
+def _face_signature_stable(prev_sig, sig,
+                           gray_threshold: float = 0.035,
+                           edge_threshold: float = 0.085) -> bool:
+    if prev_sig is None or sig is None:
+        return False
+    prev_gray, prev_edges = prev_sig
+    gray, edges = sig
+    gray_diff = float(np.mean(cv2.absdiff(prev_gray, gray)) / 255.0)
+    edge_diff = float(np.mean(cv2.absdiff(prev_edges, edges)) / 255.0)
+    return gray_diff <= gray_threshold and edge_diff <= edge_threshold
+
+
 def _detect_mouth(face_np: np.ndarray,
                   face_meta: dict,
                   face_bbox,
@@ -236,13 +269,48 @@ def smooth_mouth_tracks(store: DiskStore,
                         n_frames: int,
                         center_alpha: float = 0.45,
                         size_alpha: float = 0.55,
-                        max_rel_jump: float = 0.20) -> None:
+                        max_rel_jump: float = 0.20,
+                        group_center_strength: float = 0.05,
+                        stable_face_px: float = 0.75,
+                        stable_mouth_alpha: float = 0.0,
+                        mouth_deadband_px: float = 2.0) -> None:
     """
     Suaviza a posição da boca em coordenadas relativas ao bbox da face.
 
     Isso reduz jitter de detecção sem prender a boca em coordenadas absolutas:
     quando a cabeça se move, o bbox da face muda e a boca acompanha.
     """
+    import statistics
+
+    centers_by_group: Dict[int, List[Tuple[float, float]]] = {}
+    for q in range(n_frames):
+        if not store.has_mouth_frame(q):
+            continue
+        face_bbox = store.load_face_bbox(q)
+        if face_bbox is None:
+            continue
+        rgba, ax, ay, aw, ah = store.load_mouth_frame(q)
+        if (rgba.shape[0] <= 4 and rgba.shape[1] <= 4) or aw <= 0 or ah <= 0:
+            continue
+        meta = store.load_face_frame_meta(q) if store.has_face_frame(q) else {}
+        fg = int(meta.get("face_group", 0))
+        fx1, fy1, fx2, fy2 = face_bbox
+        fw = max(1, fx2 - fx1)
+        fh = max(1, fy2 - fy1)
+        centers_by_group.setdefault(fg, []).append((
+            (ax + aw * 0.5 - fx1) / fw,
+            (ay + ah * 0.5 - fy1) / fh,
+        ))
+
+    group_centers = {
+        fg: (
+            statistics.median(c[0] for c in centers),
+            statistics.median(c[1] for c in centers),
+        )
+        for fg, centers in centers_by_group.items()
+        if centers
+    }
+
     prev = None
     adjusted = 0
 
@@ -255,6 +323,7 @@ def smooth_mouth_tracks(store: DiskStore,
         if face_bbox is None:
             prev = None
             continue
+        face_sig = _face_motion_signature(store.load_orig(q), face_bbox)
 
         rgba, ax, ay, aw, ah = store.load_mouth_frame(q)
         if (rgba.shape[0] <= 4 and rgba.shape[1] <= 4) or aw <= 0 or ah <= 0:
@@ -268,10 +337,17 @@ def smooth_mouth_tracks(store: DiskStore,
         fx1, fy1, fx2, fy2 = face_bbox
         fw = max(1, fx2 - fx1)
         fh = max(1, fy2 - fy1)
+        face_cx = (fx1 + fx2) * 0.5
+        face_cy = (fy1 + fy2) * 0.5
         cx_rel = (ax + aw * 0.5 - fx1) / fw
         cy_rel = (ay + ah * 0.5 - fy1) / fh
         w_rel = aw / fw
         h_rel = ah / fh
+
+        if fg in group_centers:
+            gcx, gcy = group_centers[fg]
+            cx_rel = gcx * group_center_strength + cx_rel * (1.0 - group_center_strength)
+            cy_rel = gcy * group_center_strength + cy_rel * (1.0 - group_center_strength)
 
         if prev is not None and prev["fg"] == fg:
             dx = abs(cx_rel - prev["cx"])
@@ -288,6 +364,28 @@ def smooth_mouth_tracks(store: DiskStore,
         new_ax = int(round(fx1 + cx_rel * fw - new_aw * 0.5))
         new_ay = int(round(fy1 + cy_rel * fh - new_ah * 0.5))
 
+        if prev is not None and prev["fg"] == fg:
+            face_delta = max(
+                abs(face_cx - prev["face_cx"]),
+                abs(face_cy - prev["face_cy"]),
+                abs(fw - prev["face_w"]) * 0.5,
+                abs(fh - prev["face_h"]) * 0.5,
+            )
+            visual_stable = _face_signature_stable(prev.get("face_sig"), face_sig)
+            cur_mcx = new_ax + new_aw * 0.5
+            cur_mcy = new_ay + new_ah * 0.5
+            mouth_delta = max(abs(cur_mcx - prev["abs_cx"]), abs(cur_mcy - prev["abs_cy"]))
+
+            face_is_stable = visual_stable or face_delta <= stable_face_px
+            if face_is_stable and mouth_delta <= mouth_deadband_px:
+                stable_mcx = prev["abs_cx"] * (1.0 - stable_mouth_alpha) + cur_mcx * stable_mouth_alpha
+                stable_mcy = prev["abs_cy"] * (1.0 - stable_mouth_alpha) + cur_mcy * stable_mouth_alpha
+                if prev["mt"] == mt:
+                    new_aw = int(round(prev["abs_w"]))
+                    new_ah = int(round(prev["abs_h"]))
+                new_ax = int(round(stable_mcx - new_aw * 0.5))
+                new_ay = int(round(stable_mcy - new_ah * 0.5))
+
         nomouth_shape = store.load_nomouth(q).shape[:2]
         H_fr, W_fr = nomouth_shape
         new_ax = max(0, min(W_fr - 1, new_ax))
@@ -299,8 +397,16 @@ def smooth_mouth_tracks(store: DiskStore,
             store.save_mouth_frame(q, rgba, new_ax, new_ay, new_aw, new_ah)
             adjusted += 1
 
-        prev = {"fg": fg, "mt": mt, "cx": cx_rel, "cy": cy_rel,
-                "w": w_rel, "h": h_rel}
+        prev = {
+            "fg": fg, "mt": mt, "cx": cx_rel, "cy": cy_rel,
+            "w": w_rel, "h": h_rel,
+            "face_cx": face_cx, "face_cy": face_cy,
+            "face_w": fw, "face_h": fh,
+            "abs_cx": new_ax + new_aw * 0.5,
+            "abs_cy": new_ay + new_ah * 0.5,
+            "abs_w": new_aw, "abs_h": new_ah,
+            "face_sig": face_sig,
+        }
 
     if adjusted:
         print(f"[F2] Suavização temporal aplicada em {adjusted} frames.")
@@ -318,7 +424,6 @@ def process_single(q: int,
     mt        = mouth_types[q]
     meta      = store.load_face_frame_meta(q)
     fg        = int(meta.get("face_group", 0))
-    cache_key = (mt, fg)
 
     if not store.has_face_frame(q):
         store.save_mouth_frame(q, np.zeros((4, 4, 4), dtype=np.uint8), 0, 0, 0, 0)
@@ -346,7 +451,6 @@ def process_single(q: int,
         store.save_mouth_frame(q, np.zeros((4, 4, 4), dtype=np.uint8), 0, 0, 0, 0)
         return
 
-    bbox_cache[cache_key] = result
     store.save_mouth_frame(q, *result)
     if q % 20 == 0:
         print(f"  [F2] Boca {MOUTH_TYPE_NAMES[mt]} fg={fg} frame{q} "
@@ -395,7 +499,7 @@ def run_phase2(store: DiskStore,
     if not _REMBG_AVAILABLE:
         print("[F2] rembg não disponível; usando máscara YOLO/cor para recorte de boca.")
 
-    print(f"\n[F2] Bocas por frame — modelo unico face+boca, {n_frames} frames, {n_workers} workers, "
+    print(f"\n[F2] Bocas por frame estabilizadas — modelo unico face+boca, {n_frames} frames, {n_workers} workers, "
           f"upscale=auto(min={upscale_crop_face:.1f}x) conf={conf_mouth} "
           f"padding={mouth_padding_per_type} brightness={mouth_brightness_per_type}...")
 
