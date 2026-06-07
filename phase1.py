@@ -24,6 +24,50 @@ except ImportError:
     ssim = None
 
 
+def _resize_for_similarity(img, target_w: int = 256):
+    h, w = img.shape[:2]
+    if h <= 0 or w <= 0:
+        return img
+    scale = target_w / max(w, 1)
+    target_h = max(1, int(round(h * scale)))
+    return cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
+
+
+def _face_scribble(rgb) -> Tuple:
+    """
+    Extrai um "scribble" leve da face para comparar variações de linha/pose.
+
+    Anime costuma mudar pouco em textura e muito nos contornos: olhos, boca,
+    mandíbula, cabelo sobre o rosto. O mapa abaixo preserva essas linhas e
+    reduz a influência de cor/iluminação.
+    """
+    import numpy as np
+
+    small = _resize_for_similarity(rgb)
+    gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
+    if gray.shape[0] > 5 and gray.shape[1] > 5:
+        gray = cv2.bilateralFilter(gray, 5, 45, 45)
+
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    norm = clahe.apply(gray)
+
+    med = float(np.median(norm))
+    lo = int(max(20, 0.66 * med))
+    hi = int(min(180, 1.33 * med + 30))
+    canny = cv2.Canny(norm, lo, hi)
+
+    block = 15 if min(norm.shape[:2]) >= 64 else 9
+    adaptive = cv2.adaptiveThreshold(
+        norm, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
+        cv2.THRESH_BINARY_INV, block, 5)
+
+    scribble = cv2.bitwise_or(canny, adaptive)
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+    scribble = cv2.morphologyEx(scribble, cv2.MORPH_OPEN, k, iterations=1)
+
+    return norm, scribble
+
+
 def _face_similarity(gray_a, gray_b) -> float:
     if gray_a.shape != gray_b.shape:
         import cv2
@@ -35,6 +79,33 @@ def _face_similarity(gray_a, gray_b) -> float:
         d = 1.0 - float(__import__("numpy").mean(_cv2.absdiff(gray_a, gray_b)) / 255.0)
         return max(0., min(1., s * 0.7 + d * 0.3))
     return 1.0
+
+
+def _scribble_similarity(prev_feat, feat) -> float:
+    import numpy as np
+
+    gray_a, scribble_a = prev_feat
+    gray_b, scribble_b = feat
+    if gray_a.shape != gray_b.shape:
+        gray_b = cv2.resize(gray_b, (gray_a.shape[1], gray_a.shape[0]))
+        scribble_b = cv2.resize(scribble_b, (scribble_a.shape[1], scribble_a.shape[0]),
+                                interpolation=cv2.INTER_NEAREST)
+
+    gray_sim = _face_similarity(gray_a, gray_b)
+
+    if ssim is not None:
+        scribble_ssim = float(ssim(scribble_a, scribble_b, full=True)[0])
+    else:
+        scribble_ssim = 1.0 - float(np.mean(cv2.absdiff(scribble_a, scribble_b)) / 255.0)
+
+    a = scribble_a > 0
+    b = scribble_b > 0
+    inter = float(np.logical_and(a, b).sum())
+    denom = float(a.sum() + b.sum())
+    edge_f1 = (2.0 * inter / denom) if denom > 0 else 1.0
+
+    scribble_sim = max(0.0, min(1.0, scribble_ssim * 0.45 + edge_f1 * 0.55))
+    return max(0.0, min(1.0, scribble_sim * 0.70 + gray_sim * 0.30))
 
 
 def run_phase1(store: DiskStore,
@@ -112,11 +183,10 @@ def run_phase1(store: DiskStore,
 
     # ── Passo 1: face_groups ─────────────────────────────────────────────────
     import cv2 as _cv2
-    import numpy as np
 
-    print(f"\n[F1] Passo 1/4: face_groups ({n_frames} frames)...")
+    print(f"\n[F1] Passo 1/4: face_groups por scribble ({n_frames} frames)...")
     face_group = 0
-    last_gray  = None
+    last_feat  = None
     frame_meta: List[Tuple[int, int, int]] = []
 
     for q in range(n_frames):
@@ -125,15 +195,14 @@ def run_phase1(store: DiskStore,
         orig      = store.load_orig(q)
         crop = (orig[face_bbox[1]:face_bbox[3], face_bbox[0]:face_bbox[2]]
                 if face_bbox else orig)
-        gray = _cv2.cvtColor(
-            _cv2.GaussianBlur(crop, (5, 5), 0) if crop.shape[0] > 5 else crop,
-            _cv2.COLOR_RGB2GRAY)
-        if last_gray is not None:
-            sim = _face_similarity(last_gray, gray)
+        feat = _face_scribble(crop)
+        if last_feat is not None:
+            sim = _scribble_similarity(last_feat, feat)
             if sim <= sim_threshold:
                 face_group += 1
-                print(f"  [F1] Rosto mudou frame {q} → group={face_group}")
-        last_gray = gray
+                print(f"  [F1] Scribble da face mudou frame {q} "
+                      f"(sim={sim:.3f}) → group={face_group}")
+        last_feat = feat
         frame_meta.append((q, mt, face_group))
         del orig
 

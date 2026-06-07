@@ -4,13 +4,12 @@ from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
-import torch
 from PIL import Image
 
 from .constants import MOUTH_TYPE_NAMES
 from .store import DiskStore
 from .utils import cuda_cleanup, vram_info
-from .phase0 import _dynamic_upscale
+from .phase0 import _best_detection, _dynamic_upscale, _run_yolo, YOLO_MOUTH_CLASS_ID
 
 try:
     from rembg import remove as _rembg_remove
@@ -19,11 +18,90 @@ except ImportError:
     _REMBG_AVAILABLE = False
 
 
+def _expand_bbox(bx1: int, by1: int, bx2: int, by2: int,
+                 fW: int, fH: int, mouth_type: int,
+                 user_padding: int) -> Tuple[int, int, int, int]:
+    bw = max(1, bx2 - bx1)
+    bh = max(1, by2 - by1)
+    if mouth_type == 0:
+        auto_x = max(1, int(round(bw * 0.03)))
+        auto_y = max(1, int(round(bh * 0.04)))
+    elif mouth_type == 1:
+        auto_x = max(1, int(round(bw * 0.04)))
+        auto_y = max(1, int(round(bh * 0.08)))
+    else:
+        auto_x = max(1, int(round(bw * 0.05)))
+        auto_y = max(1, int(round(bh * 0.10)))
+
+    pad_x = auto_x + user_padding
+    pad_y = auto_y + user_padding
+    return (
+        max(0, bx1 - pad_x),
+        max(0, by1 - pad_y),
+        min(fW, bx2 + pad_x),
+        min(fH, by2 + pad_y),
+    )
+
+
+def _ellipse_mask(h: int, w: int, scale_x: float, scale_y: float,
+                  blur_divisor: int = 12) -> np.ndarray:
+    mask = np.zeros((h, w), dtype=np.uint8)
+    center = (w // 2, h // 2)
+    axes = (max(1, int(w * scale_x)), max(1, int(h * scale_y)))
+    cv2.ellipse(mask, center, axes, 0, 0, 360, 255, -1)
+    k = max(3, (min(h, w) // blur_divisor) | 1)
+    return cv2.GaussianBlur(mask, (k, k), 0).astype(np.float32) / 255.0
+
+
+def _open_mouth_rgba(mouth_crop: np.ndarray, mouth_type: int) -> np.ndarray:
+    if _REMBG_AVAILABLE:
+        rembg_rgba = np.array(
+            _rembg_remove(Image.fromarray(mouth_crop)).convert("RGBA"), dtype=np.uint8)
+        rembg_alpha = rembg_rgba[:, :, 3].astype(np.float32) / 255.0
+    else:
+        rembg_alpha = np.ones(mouth_crop.shape[:2], dtype=np.float32)
+
+    h, w = mouth_crop.shape[:2]
+    hsv = cv2.cvtColor(mouth_crop, cv2.COLOR_RGB2HSV)
+    sat = hsv[:, :, 1].astype(np.float32) / 255.0
+    gray = cv2.cvtColor(mouth_crop, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+
+    r = mouth_crop[:, :, 0].astype(np.int16)
+    g = mouth_crop[:, :, 1].astype(np.int16)
+    b = mouth_crop[:, :, 2].astype(np.int16)
+    red_bias = ((r > g + 8) & (r > b + 4)).astype(np.float32)
+
+    dark_or_color = np.maximum.reduce([
+        np.clip((0.60 - gray) / 0.34, 0.0, 1.0),
+        np.clip((sat - 0.30) / 0.38, 0.0, 1.0),
+        red_bias * np.clip((r.astype(np.float32) - 80.0) / 140.0, 0.0, 1.0),
+    ])
+
+    edges = cv2.Canny((gray * 255).astype(np.uint8), 35, 110)
+    edge_r = max(1, min(h, w) // 18)
+    edge_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (edge_r * 2 + 1, edge_r * 2 + 1))
+    edge_mask = cv2.dilate(edges, edge_k, iterations=1).astype(np.float32) / 255.0
+
+    ellipse = _ellipse_mask(h, w, 0.43, 0.39 if mouth_type == 1 else 0.43)
+    edge_support = cv2.GaussianBlur(dark_or_color, (5, 5), 0)
+    alpha = np.maximum(rembg_alpha * dark_or_color, edge_mask * edge_support * 0.85)
+    alpha = np.maximum(alpha, dark_or_color * 0.65)
+    alpha *= ellipse
+
+    alpha[alpha < 0.22] = 0.0
+    alpha = cv2.GaussianBlur(alpha, (3, 3), 0)
+    alpha[alpha < 0.18] = 0.0
+    alpha = np.clip(alpha, 0.0, 1.0)
+
+    rgb = mouth_crop.copy()
+    return np.dstack([rgb, (alpha * 255).astype(np.uint8)])
+
+
 def _detect_mouth(face_np: np.ndarray,
                   face_meta: dict,
                   face_bbox,
                   nomouth_shape: Tuple[int, int],
-                  mouth_model,
+                  detection_model,
                   upscale_crop_face: float,
                   conf_mouth: float,
                   mouth_type: int = 0,
@@ -64,19 +142,16 @@ def _detect_mouth(face_np: np.ndarray,
     up_W, up_H = _dynamic_upscale(fH, fW, upscale_crop_face)
     face_up = cv2.resize(face_np, (up_W, up_H), interpolation=cv2.INTER_LANCZOS4)
 
-    with torch.no_grad():
-        results = mouth_model(face_up, verbose=False, conf=conf_mouth)
-    boxes = results[0].boxes
+    xyxy, confs, classes = _run_yolo(detection_model, face_up, conf_mouth)
+    mouth_det = _best_detection(xyxy, confs, classes, YOLO_MOUTH_CLASS_ID)
+    del xyxy, confs, classes, face_up
 
-    if boxes is None or len(boxes) == 0:
-        del results, boxes, face_up
+    if mouth_det is None:
         return None
 
-    best = int(np.argmax(boxes.conf.cpu().numpy()))
-    bx1u, by1u, bx2u, by2u = boxes.xyxy.cpu().numpy()[best].astype(int)
+    (bx1u, by1u, bx2u, by2u), _ = mouth_det
     bx1u = max(0, bx1u); by1u = max(0, by1u)
     bx2u = min(up_W, bx2u); by2u = min(up_H, by2u)
-    del results, boxes, face_up
 
     if bx2u <= bx1u or by2u <= by1u:
         return None
@@ -89,11 +164,8 @@ def _detect_mouth(face_np: np.ndarray,
     if bx2 <= bx1 or by2 <= by1:
         return None
 
-    # Aplica padding ao bbox da boca (expande antes de recortar)
-    if mouth_padding > 0:
-        pad = mouth_padding
-        bx1 = max(0, bx1 - pad); by1 = max(0, by1 - pad)
-        bx2 = min(fW, bx2 + pad); by2 = min(fH, by2 + pad)
+    bx1, by1, bx2, by2 = _expand_bbox(
+        bx1, by1, bx2, by2, fW, fH, mouth_type, mouth_padding)
 
     mouth_crop = face_np[by1:by2, bx1:bx2].copy()
 
@@ -104,68 +176,49 @@ def _detect_mouth(face_np: np.ndarray,
         ).astype(np.uint8)
 
     if mouth_type == 0:
-        # ── neutral_closed: máscara híbrida (bordas + elipse) ────────────────
-        # Problema com rembg: a cor dos lábios fechados é muito próxima da pele,
-        # então o rembg apaga as linhas junto com o fundo.
-        # Problema com elipse pura: o feather suaviza as bordas do elipse, mas
-        # as linhas dos lábios ficam exatamente nessa região de transição — alpha
-        # baixo demais para aparecer na composição final.
-        #
-        # Nova abordagem em 3 camadas:
-        #   1. "edge_mask": Canny no canal L (luminância) detecta as linhas
-        #      escuras dos lábios e as dilata para ter espessura visível.
-        #   2. "region_mask": elipse LARGA (95%×85%) com feather MÍNIMO —
-        #      serve apenas para excluir os cantos do bbox, não cortar os lábios.
-        #   3. alpha final = max(edge_mask, region_mask) — garante que qualquer
-        #      pixel que seja borda de lábio OU dentro do elipse seja preservado.
+        # ── neutral_closed: preserva linhas, não uma mancha de pele ──────────
+        # Para boca fechada, preencher a elipse inteira carrega pele gerada com
+        # tom diferente. Aqui o alpha fica restrito a linhas/escuridão dos lábios.
         ch, cw = mouth_crop.shape[:2]
 
-        # --- Camada 1: bordas de lábio via Canny ---
         gray = cv2.cvtColor(mouth_crop, cv2.COLOR_RGB2GRAY)
-        # Equalização leve para realçar contraste dos lábios em relação à pele
+        hsv = cv2.cvtColor(mouth_crop, cv2.COLOR_RGB2HSV)
+        sat = hsv[:, :, 1].astype(np.float32) / 255.0
         gray_eq = cv2.equalizeHist(gray)
-        # Canny com thresholds adaptados ao tamanho do recorte
+
         lo = max(20, int(cw * 0.5))
         hi = max(60, int(cw * 1.5))
         edges = cv2.Canny(gray_eq, lo, hi)
-        # Dilata as bordas detectadas para cobrir a linha de lábio com espessura
-        dil_r = max(2, min(ch, cw) // 8)
+        dil_r = max(1, min(ch, cw) // 12)
         dil_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dil_r * 2 + 1, dil_r * 2 + 1))
         edge_mask = cv2.dilate(edges, dil_k, iterations=1).astype(np.float32) / 255.0
-        # Suavização leve para anti-aliasing nas bordas
-        edge_ksize = max(3, (dil_r | 1))
-        edge_mask = cv2.GaussianBlur(edge_mask, (edge_ksize, edge_ksize), 0)
+        edge_mask = cv2.GaussianBlur(edge_mask, (3, 3), 0)
 
-        # --- Camada 2: elipse larga com feather mínimo (só exclui cantos) ---
-        region = np.zeros((ch, cw), dtype=np.uint8)
+        gray_f = gray.astype(np.float32) / 255.0
+        dark_line = np.clip((0.58 - gray_f) / 0.28, 0.0, 1.0)
+        color_line = np.clip((sat - 0.24) / 0.36, 0.0, 1.0)
+        line_mask = np.maximum(edge_mask * 0.95, np.maximum(dark_line, color_line) * 0.70)
+
+        support = np.zeros((ch, cw), dtype=np.uint8)
         cx_e, cy_e = cw // 2, ch // 2
-        # Elipse bem generosa: 95% da largura, 85% da altura
-        axes = (max(1, int(cw * 0.475)), max(1, int(ch * 0.425)))
-        cv2.ellipse(region, (cx_e, cy_e), axes, 0, 0, 360, 255, -1)
-        # Feather mínimo — só suaviza a borda do elipse, não encolhe o interior
-        feather_k = max(3, (min(ch, cw) // 12) | 1)
-        region_mask = cv2.GaussianBlur(region, (feather_k, feather_k), 0).astype(np.float32) / 255.0
+        axes = (max(1, int(cw * 0.48)), max(1, int(ch * 0.30)))
+        cv2.ellipse(support, (cx_e, cy_e), axes, 0, 0, 360, 255, -1)
+        support_k = max(3, (min(ch, cw) // 14) | 1)
+        support_f = cv2.GaussianBlur(support, (support_k, support_k), 0).astype(np.float32) / 255.0
 
-        # --- Camada 3: combina — preserva bordas de lábio E interior do elipse ---
-        mask_f = np.maximum(edge_mask, region_mask)
-        # Garante que a máscara não ultrapasse 1.0 e não introduza ruído fora da elipse
-        # (pixels fora do elipse expandido ficam com alpha apenas da borda, se houver)
-        outer_ellipse = np.zeros((ch, cw), dtype=np.uint8)
-        axes_outer = (max(1, int(cw * 0.50)), max(1, int(ch * 0.50)))
-        cv2.ellipse(outer_ellipse, (cx_e, cy_e), axes_outer, 0, 0, 360, 255, -1)
-        outer_f = cv2.GaussianBlur(outer_ellipse, (feather_k, feather_k), 0).astype(np.float32) / 255.0
-        # Fora do elipse externo, mantém apenas as bordas detectadas (evita artefatos de pele)
-        mask_f = np.where(outer_f > 0.05, mask_f, edge_mask * outer_f * 4)
+        mask_f = line_mask * support_f
+        mask_f[mask_f < 0.18] = 0.0
+        mask_f = cv2.GaussianBlur(mask_f, (3, 3), 0)
+        mask_f[mask_f < 0.12] = 0.0
         mask_f = np.clip(mask_f, 0.0, 1.0)
 
-        # Pré-multiplica RGB pelo alpha para composite() desmultiplicar corretamente
-        rgb_pm = np.clip(mouth_crop.astype(np.float32) * mask_f[:, :, None], 0, 255).astype(np.uint8)
         alpha8 = (mask_f * 255).clip(0, 255).astype(np.uint8)
-        mouth_rgba = np.dstack([rgb_pm, alpha8])
+        mouth_rgba = np.dstack([mouth_crop, alpha8])
     else:
-        # ── half_open / fully_open: rembg (segmentação por cor funciona bem) ─
-        mouth_rgba = np.array(
-            _rembg_remove(Image.fromarray(mouth_crop)).convert("RGBA"), dtype=np.uint8)
+        # ── half_open / fully_open: combina YOLO + rembg + máscara de cor ───
+        # O rembg sozinho às vezes preserva pele ao redor dos lábios; a máscara
+        # abaixo restringe o alpha a regiões escuras/coloridas típicas da boca.
+        mouth_rgba = _open_mouth_rgba(mouth_crop, mouth_type)
 
     del mouth_crop
 
@@ -178,10 +231,85 @@ def _detect_mouth(face_np: np.ndarray,
     return mouth_rgba, abs_x, abs_y, abs_w, abs_h
 
 
+def smooth_mouth_tracks(store: DiskStore,
+                        mouth_types: List[int],
+                        n_frames: int,
+                        center_alpha: float = 0.45,
+                        size_alpha: float = 0.55,
+                        max_rel_jump: float = 0.20) -> None:
+    """
+    Suaviza a posição da boca em coordenadas relativas ao bbox da face.
+
+    Isso reduz jitter de detecção sem prender a boca em coordenadas absolutas:
+    quando a cabeça se move, o bbox da face muda e a boca acompanha.
+    """
+    prev = None
+    adjusted = 0
+
+    for q in range(n_frames):
+        if not store.has_mouth_frame(q):
+            prev = None
+            continue
+
+        face_bbox = store.load_face_bbox(q)
+        if face_bbox is None:
+            prev = None
+            continue
+
+        rgba, ax, ay, aw, ah = store.load_mouth_frame(q)
+        if (rgba.shape[0] <= 4 and rgba.shape[1] <= 4) or aw <= 0 or ah <= 0:
+            prev = None
+            continue
+
+        meta = store.load_face_frame_meta(q) if store.has_face_frame(q) else {}
+        fg = int(meta.get("face_group", 0))
+        mt = mouth_types[q]
+
+        fx1, fy1, fx2, fy2 = face_bbox
+        fw = max(1, fx2 - fx1)
+        fh = max(1, fy2 - fy1)
+        cx_rel = (ax + aw * 0.5 - fx1) / fw
+        cy_rel = (ay + ah * 0.5 - fy1) / fh
+        w_rel = aw / fw
+        h_rel = ah / fh
+
+        if prev is not None and prev["fg"] == fg:
+            dx = abs(cx_rel - prev["cx"])
+            dy = abs(cy_rel - prev["cy"])
+            if dx <= max_rel_jump and dy <= max_rel_jump:
+                cx_rel = prev["cx"] * (1.0 - center_alpha) + cx_rel * center_alpha
+                cy_rel = prev["cy"] * (1.0 - center_alpha) + cy_rel * center_alpha
+                if prev["mt"] == mt:
+                    w_rel = prev["w"] * (1.0 - size_alpha) + w_rel * size_alpha
+                    h_rel = prev["h"] * (1.0 - size_alpha) + h_rel * size_alpha
+
+        new_aw = max(1, int(round(w_rel * fw)))
+        new_ah = max(1, int(round(h_rel * fh)))
+        new_ax = int(round(fx1 + cx_rel * fw - new_aw * 0.5))
+        new_ay = int(round(fy1 + cy_rel * fh - new_ah * 0.5))
+
+        nomouth_shape = store.load_nomouth(q).shape[:2]
+        H_fr, W_fr = nomouth_shape
+        new_ax = max(0, min(W_fr - 1, new_ax))
+        new_ay = max(0, min(H_fr - 1, new_ay))
+        new_aw = min(new_aw, W_fr - new_ax)
+        new_ah = min(new_ah, H_fr - new_ay)
+
+        if (new_ax, new_ay, new_aw, new_ah) != (ax, ay, aw, ah):
+            store.save_mouth_frame(q, rgba, new_ax, new_ay, new_aw, new_ah)
+            adjusted += 1
+
+        prev = {"fg": fg, "mt": mt, "cx": cx_rel, "cy": cy_rel,
+                "w": w_rel, "h": h_rel}
+
+    if adjusted:
+        print(f"[F2] Suavização temporal aplicada em {adjusted} frames.")
+
+
 def process_single(q: int,
                    store: DiskStore,
                    mouth_types: List[int],
-                   mouth_model,
+                   detection_model,
                    bbox_cache: Dict,
                    upscale_crop_face: float,
                    conf_mouth: float,
@@ -191,10 +319,6 @@ def process_single(q: int,
     meta      = store.load_face_frame_meta(q)
     fg        = int(meta.get("face_group", 0))
     cache_key = (mt, fg)
-
-    if cache_key in bbox_cache:
-        store.save_mouth_frame(q, *bbox_cache[cache_key])
-        return
 
     if not store.has_face_frame(q):
         store.save_mouth_frame(q, np.zeros((4, 4, 4), dtype=np.uint8), 0, 0, 0, 0)
@@ -213,7 +337,7 @@ def process_single(q: int,
         return
 
     result = _detect_mouth(face_np, face_meta, face_bbox, nomouth_shape,
-                           mouth_model, upscale_crop_face, conf_mouth,
+                           detection_model, upscale_crop_face, conf_mouth,
                            mouth_type=mt,
                            mouth_padding_per_type=mouth_padding_per_type,
                            mouth_brightness_per_type=mouth_brightness_per_type)
@@ -224,20 +348,21 @@ def process_single(q: int,
 
     bbox_cache[cache_key] = result
     store.save_mouth_frame(q, *result)
-    print(f"  [F2] CANONICAL {MOUTH_TYPE_NAMES[mt]} fg={fg} repr=frame{q} "
-          f"→ ({result[1]},{result[2]}) {result[3]}×{result[4]}px")
+    if q % 20 == 0:
+        print(f"  [F2] Boca {MOUTH_TYPE_NAMES[mt]} fg={fg} frame{q} "
+              f"→ ({result[1]},{result[2]}) {result[3]}×{result[4]}px")
     cuda_cleanup()
 
 
 def _worker(q: int, store: DiskStore, mouth_types: List[int],
-            mouth_model_path: str, bbox_cache: Dict,
+            detection_model_path: str, bbox_cache: Dict,
             bbox_cache_lock: threading.Lock,
             upscale_crop_face: float, conf_mouth: float,
             mouth_padding_per_type: Dict[int, int] = None,
             mouth_brightness_per_type: Dict[int, float] = None) -> int:
     from ultralytics import YOLO
     try:
-        model = YOLO(mouth_model_path)
+        model = YOLO(detection_model_path)
         local: Dict = {}
         process_single(q, store, mouth_types, model, local,
                        upscale_crop_face, conf_mouth,
@@ -261,69 +386,36 @@ def _worker(q: int, store: DiskStore, mouth_types: List[int],
 def run_phase2(store: DiskStore,
                mouth_types: List[int],
                n_frames: int,
-               mouth_model_path: str,
+               detection_model_path: str,
                n_workers: int,
                upscale_crop_face: float = 2.0,
                conf_mouth: float = 0.1,
                mouth_padding_per_type: Dict[int, int] = None,
                mouth_brightness_per_type: Dict[int, float] = None) -> None:
     if not _REMBG_AVAILABLE:
-        raise ImportError("pip install rembg")
+        print("[F2] rembg não disponível; usando máscara YOLO/cor para recorte de boca.")
 
-    print(f"\n[F2] Bocas paralela — {n_frames} frames, {n_workers} workers, "
+    print(f"\n[F2] Bocas por frame — modelo unico face+boca, {n_frames} frames, {n_workers} workers, "
           f"upscale=auto(min={upscale_crop_face:.1f}x) conf={conf_mouth} "
           f"padding={mouth_padding_per_type} brightness={mouth_brightness_per_type}...")
-
-    # Etapa 2a: um frame representativo por chave canônica
-    repr_frames: Dict[Tuple[int, int], int] = {}
-    for q in range(n_frames):
-        try:
-            meta = store.load_face_frame_meta(q)
-            fg   = int(meta.get("face_group", 0))
-            key  = (mouth_types[q], fg)
-            if key not in repr_frames:
-                repr_frames[key] = q
-        except Exception:
-            pass
 
     bbox_cache: Dict = {}
     lock = threading.Lock()
 
     with ThreadPoolExecutor(max_workers=n_workers) as ex:
         futures = {
-            ex.submit(_worker, q, store, mouth_types, mouth_model_path,
+            ex.submit(_worker, q, store, mouth_types, detection_model_path,
                       bbox_cache, lock, upscale_crop_face, conf_mouth,
                       mouth_padding_per_type, mouth_brightness_per_type): q
-            for q in repr_frames.values()
+            for q in range(n_frames)
         }
         for future in as_completed(futures):
             try:
                 future.result()
             except Exception as e:
-                print(f"[F2a] EXCEÇÃO: {e}")
+                print(f"[F2] EXCEÇÃO: {e}")
 
-    print(f"[F2] {len(bbox_cache)} bboxes canônicas detectadas.")
-
-    # Etapa 2b: propaga para todos os frames
-    for q in range(n_frames):
-        if store.has_mouth_frame(q):
-            continue
-        try:
-            meta = store.load_face_frame_meta(q)
-            fg   = int(meta.get("face_group", 0))
-            key  = (mouth_types[q], fg)
-            with lock:
-                canonical = bbox_cache.get(key)
-            if canonical:
-                store.save_mouth_frame(q, *canonical)
-            else:
-                store.save_mouth_frame(q, np.zeros((4, 4, 4), dtype=np.uint8), 0, 0, 0, 0)
-        except Exception as e:
-            print(f"[F2b] Frame {q}: {e}")
-            try:
-                store.save_mouth_frame(q, np.zeros((4, 4, 4), dtype=np.uint8), 0, 0, 0, 0)
-            except Exception:
-                pass
+    smooth_mouth_tracks(store, mouth_types, n_frames)
 
     cuda_cleanup()
     print(f"[F2] Concluída. {vram_info()}")

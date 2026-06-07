@@ -8,7 +8,7 @@ Módulos:
   store.py      — DiskStore, VramGuard
   phonemes.py   — AllosaurusDetector
   lora.py       — apply_lora
-  phase0.py     — YOLO + inpainting
+  phase0.py     — YOLO unico face+boca + inpainting
   phase1.py     — Diffusion Z-Turbo + LoRA por tipo
   phase2.py     — Detecção de boca + rembg
   phase3.py     — Composição + overlap workers
@@ -36,7 +36,7 @@ from .utils import (
 from .phase0 import run_phase0
 from .character_detect import build_character_bboxes
 from .phase1 import run_phase1
-from .phase2 import run_phase2, _REMBG_AVAILABLE
+from .phase2 import run_phase2, smooth_mouth_tracks, _REMBG_AVAILABLE
 from .phase3 import run_phase3, launch_overlap_workers, ensure_all_outputs
 
 
@@ -52,6 +52,12 @@ class LipSyncZTurboPipeline:
     @classmethod
     def INPUT_TYPES(cls):
         node_dir = os.path.dirname(os.path.abspath(__file__))
+        external_detection_model = "/disco3/anime_mouth_yolo/best.pt"
+        detection_model_default = (
+            external_detection_model
+            if os.path.exists(external_detection_model)
+            else os.path.join(node_dir, "best.pt")
+        )
         return {
             "required": {
                 "audio":            ("AUDIO",),
@@ -60,13 +66,10 @@ class LipSyncZTurboPipeline:
                 "model_patch":      ("MODEL_PATCH",),
                 "clip":             ("CLIP",),
                 "vae":              ("VAE",),
-                "face_model_path":  ("STRING", {
-                    "default": os.path.join(node_dir, "yolov8x6_animeface.pt"),
+                "detection_model_path": ("STRING", {
+                    "default": detection_model_default,
                     "multiline": False,
-                }),
-                "mouth_model_path": ("STRING", {
-                    "default": os.path.join(node_dir, "yolov8_anime_mouth.pt"),
-                    "multiline": False,
+                    "tooltip": "Modelo YOLO unico: classe 0 = face, classe 1 = boca.",
                 }),
             },
             "optional": {
@@ -163,7 +166,7 @@ class LipSyncZTurboPipeline:
     def run(
         self,
         audio, images, model, model_patch, clip, vae,
-        face_model_path: str, mouth_model_path: str,
+        detection_model_path: str,
         # Geral
         fps: int = 12, source_fps: float = 12.0,
         lang_id: str = "uni", sim_threshold: float = 0.92,
@@ -303,7 +306,7 @@ class LipSyncZTurboPipeline:
             n_workers = compute_workers(vram_safety_margin_mb)
             run_phase0(
                 store, n_frames,
-                face_model_path, mouth_model_path,
+                detection_model_path,
                 vram_safety_margin_mb,
                 mask_dilation, mask_blur,
                 remove_mouth, upscale_crop_face,
@@ -317,7 +320,7 @@ class LipSyncZTurboPipeline:
                 canonical_cache: Dict = {}
 
                 overlap_threads, stop_event = launch_overlap_workers(
-                    ready_queue, store, mouth_types_list, mouth_model_path,
+                    ready_queue, store, mouth_types_list, detection_model_path,
                     compose_feather_px, canonical_cache,
                     vram_safety_margin_mb, upscale_crop_face, mouth_conf,
                     mouth_padding_per_type=mouth_padding_per_type,
@@ -344,6 +347,9 @@ class LipSyncZTurboPipeline:
                     if t.is_alive():
                         print(f"[Overlap] Worker {t.name} não finalizou.")
                 stop_event.set()
+                smooth_mouth_tracks(store, mouth_types_list, n_frames)
+                n_workers_f3 = compute_workers(vram_safety_margin_mb)
+                run_phase3(store, n_frames, compose_feather_px, n_workers_f3)
                 ensure_all_outputs(store, n_frames, compose_feather_px)
 
             else:
@@ -363,7 +369,7 @@ class LipSyncZTurboPipeline:
 
                 n_workers_f2 = compute_workers(vram_safety_margin_mb)
                 run_phase2(
-                    store, mouth_types_list, n_frames, mouth_model_path,
+                    store, mouth_types_list, n_frames, detection_model_path,
                     n_workers_f2, upscale_crop_face, mouth_conf,
                     mouth_padding_per_type=mouth_padding_per_type,
                     mouth_brightness_per_type=mouth_brightness_per_type,

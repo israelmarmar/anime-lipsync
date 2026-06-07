@@ -14,7 +14,7 @@ from .utils import cuda_cleanup, vram_free_mb, vram_info
 
 
 # ===========================================================================
-# Composição sem borda (matting do alpha do rembg)
+# Composição sem borda
 # ===========================================================================
 
 def composite(base: np.ndarray,
@@ -37,15 +37,10 @@ def composite(base: np.ndarray,
     rgb_p = m[:mh, :mw, :3].astype(np.float32)
     raw_a = m[:mh, :mw, 3].astype(np.float32)
 
-    # Descarta pixels de borda com alpha residual do rembg
-    raw_a[raw_a < 10] = 0
+    # Descarta pixels residuais de pele/borda com alpha fraco.
+    raw_a[raw_a < 32] = 0
 
-    # Matting: rembg salva RGB pré-multiplicado pelo alpha.
-    # Dividindo pelo alpha recuperamos a cor real antes de compor.
     alpha_norm = raw_a / 255.0
-    safe_a     = np.where(alpha_norm > 0, alpha_norm, 1.0)
-    rgb_p      = np.clip(rgb_p / safe_a[:, :, None], 0, 255)
-
     alpha  = alpha_norm[:, :, None]
     base_p = comp[ay:y2, ax:x2].astype(np.float32)
     comp[ay:y2, ax:x2] = (rgb_p * alpha + base_p * (1.0 - alpha)).clip(0, 255).astype(np.uint8)
@@ -125,7 +120,7 @@ def _overlap_worker(worker_id: int,
                     ready_queue: Queue,
                     store: DiskStore,
                     mouth_types: List[int],
-                    mouth_model_path: str,
+                    detection_model_path: str,
                     feather_px: int,
                     canonical_cache: Dict,
                     cache_lock: threading.Lock,
@@ -138,7 +133,7 @@ def _overlap_worker(worker_id: int,
                     mouth_brightness_per_type: Dict = None) -> None:
     from ultralytics import YOLO
     try:
-        mouth_model = YOLO(mouth_model_path)
+        detection_model = YOLO(detection_model_path)
     except Exception as e:
         print(f"[Overlap-{worker_id}] Falha YOLO: {e}")
         return
@@ -154,27 +149,10 @@ def _overlap_worker(worker_id: int,
             break
 
         try:
-            meta = store.load_face_frame_meta(q) if store.has_face_frame(q) else {}
-            fg   = int(meta.get("face_group", 0))
-            mt   = mouth_types[q]
-            key  = (mt, fg)
-
-            with cache_lock:
-                canonical = canonical_cache.get(key)
-
-            if canonical is not None:
-                store.save_mouth_frame(q, *canonical)
-            else:
-                local: Dict = {}
-                process_single(q, store, mouth_types, mouth_model, local,
-                               upscale_crop_face, conf_mouth,
-                               mouth_padding_per_type, mouth_brightness_per_type)
-                if key in local:
-                    with cache_lock:
-                        if key not in canonical_cache:
-                            canonical_cache[key] = local[key]
-                        canonical = canonical_cache[key]
-                    store.save_mouth_frame(q, *canonical)
+            local: Dict = {}
+            process_single(q, store, mouth_types, detection_model, local,
+                           upscale_crop_face, conf_mouth,
+                           mouth_padding_per_type, mouth_brightness_per_type)
 
             compose_frame(q, store, feather_px)
 
@@ -192,7 +170,7 @@ def _overlap_worker(worker_id: int,
                 print(f"[Overlap] {processed_counter[0]} frames (worker {worker_id})")
 
     try:
-        del mouth_model
+        del detection_model
     except Exception:
         pass
     cuda_cleanup()
@@ -202,7 +180,7 @@ def _overlap_worker(worker_id: int,
 def launch_overlap_workers(ready_queue: Queue,
                             store: DiskStore,
                             mouth_types: List[int],
-                            mouth_model_path: str,
+                            detection_model_path: str,
                             feather_px: int,
                             canonical_cache: Dict,
                             vram_safety_mb: int = 1024,
@@ -221,7 +199,7 @@ def launch_overlap_workers(ready_queue: Queue,
         _MAX_WORKERS,
         int(max(0., vram_free_mb() - vram_safety_mb) // _VRAM_PER_WORKER_MB),
     ))
-    print(f"[Overlap] Lançando {n_workers} workers "
+    print(f"[Overlap] Lançando {n_workers} workers com YOLO unico "
           f"(upscale=auto(min={upscale_crop_face:.1f}x) conf={conf_mouth} "
           f"padding={mouth_padding_per_type} brightness={mouth_brightness_per_type})...")
 
@@ -234,7 +212,7 @@ def launch_overlap_workers(ready_queue: Queue,
     for i in range(n_workers):
         t = threading.Thread(
             target=_overlap_worker,
-            args=(i, ready_queue, store, mouth_types, mouth_model_path,
+            args=(i, ready_queue, store, mouth_types, detection_model_path,
                   feather_px, canonical_cache, cache_lock,
                   stop_event, processed_ctr, counter_lock,
                   upscale_crop_face, conf_mouth,

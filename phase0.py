@@ -3,12 +3,12 @@ phase0.py — Fase 0: preprocessamento paralelo
 ==============================================
 
 Fluxo por frame (sem personagem):
-  frame → YOLO face → face_bbox → YOLO boca (no crop upscalado) → inpaint
+  frame → YOLO face+boca → face_bbox + mouth_bbox → inpaint
 
 Fluxo por frame (com personagem via Florence-2):
   frame → character_bbox (pré-calculado) → crop do personagem
-        → YOLO face no crop → face_bbox (coordenadas absolutas no frame)
-        → YOLO boca (no crop upscalado da face) → inpaint
+        → YOLO face+boca no crop → face_bbox + mouth_bbox
+        → inpaint
 """
 
 import time
@@ -25,6 +25,9 @@ from .utils import build_mask, cv2_inpaint, cuda_cleanup, vram_info
 
 
 _TARGET_SIDE_PX = 512  # lado alvo para upscale dinamico
+YOLO_FACE_CLASS_ID = 0
+YOLO_MOUTH_CLASS_ID = 1
+YOLO_IMGSZ = 768
 
 
 def _dynamic_upscale(fH: int, fW: int, upscale_crop_face: float) -> Tuple[int, int]:
@@ -46,23 +49,50 @@ def _dynamic_upscale(fH: int, fW: int, upscale_crop_face: float) -> Tuple[int, i
 
 
 
-def _run_yolo(model, img, conf):
+def _run_yolo(model, img, conf, imgsz: int = YOLO_IMGSZ):
     with torch.no_grad():
-        results = model(img, verbose=False, conf=conf)
+        results = model.predict(img, verbose=False, conf=conf, imgsz=imgsz)
     boxes = results[0].boxes
-    xyxy = confs = None
+    xyxy = confs = classes = None
     if boxes is not None and len(boxes) > 0:
-        xyxy  = boxes.xyxy.cpu().numpy()
-        confs = boxes.conf.cpu().numpy()
+        xyxy    = boxes.xyxy.cpu().numpy()
+        confs   = boxes.conf.cpu().numpy()
+        classes = boxes.cls.cpu().numpy().astype(int)
     del results, boxes
-    return xyxy, confs
+    return xyxy, confs, classes
+
+
+def _best_detection(xyxy, confs, classes, class_id: int):
+    if xyxy is None or confs is None or classes is None:
+        return None
+    idxs = np.where(classes == class_id)[0]
+    if len(idxs) == 0:
+        return None
+    best = idxs[int(np.argmax(confs[idxs]))]
+    return xyxy[best].astype(int), float(confs[best])
+
+
+def _best_mouth_inside_face(xyxy, confs, classes, face_bbox):
+    if xyxy is None or confs is None or classes is None or face_bbox is None:
+        return None
+    fx1, fy1, fx2, fy2 = face_bbox
+    candidates = []
+    for i in np.where(classes == YOLO_MOUTH_CLASS_ID)[0]:
+        x1, y1, x2, y2 = xyxy[i].astype(int)
+        cx = (x1 + x2) / 2.0
+        cy = (y1 + y2) / 2.0
+        if fx1 <= cx <= fx2 and fy1 <= cy <= fy2:
+            candidates.append(i)
+    if not candidates:
+        return None
+    best = candidates[int(np.argmax(confs[candidates]))]
+    return xyxy[best].astype(int), float(confs[best])
 
 
 def preprocess_frame(
     idx: int,
     store: DiskStore,
-    face_model_path: str,
-    mouth_model_path: str,
+    detection_model_path: str,
     guard: VramGuard,
     mask_dilation: int,
     mask_blur: int,
@@ -80,8 +110,6 @@ def preprocess_frame(
                      pré-calculado pela Florence-2. Quando fornecido,
                      o YOLO de face só busca dentro deste crop.
     """
-    from ultralytics import YOLO
-
     last_exc = None
     for attempt in range(_OOM_MAX_RETRIES + 1):
         if attempt > 0:
@@ -112,16 +140,20 @@ def preprocess_frame(
             sH, sW = search_img.shape[:2]
 
             if sH > 0 and sW > 0:
-                face_model      = YOLO(face_model_path)
-                xyxy_f, confs_f = _run_yolo(face_model, search_img, conf_face)
-                del face_model
+                from ultralytics import YOLO
+                detection_model = YOLO(detection_model_path)
+                conf_detect = min(conf_face, conf_mouth)
+                xyxy_d, confs_d, classes_d = _run_yolo(
+                    detection_model, search_img, conf_detect)
 
-                if xyxy_f is not None:
-                    best               = int(np.argmax(confs_f))
-                    fx1, fy1, fx2, fy2 = xyxy_f[best].astype(int)
+                face_det = _best_detection(
+                    xyxy_d, confs_d, classes_d, YOLO_FACE_CLASS_ID)
+                if face_det is not None and face_det[1] >= conf_face:
+                    (fx1, fy1, fx2, fy2), _ = face_det
 
                     # Remap para coordenadas absolutas no frame
                     ox, oy = search_offset
+                    face_xyxy_search = (fx1, fy1, fx2, fy2)
                     fx1 += ox; fy1 += oy; fx2 += ox; fy2 += oy
 
                     mx  = int((fx2 - fx1) * face_margin)
@@ -134,25 +166,42 @@ def preprocess_frame(
                         face_crop = img_np[by1:by2, bx1:bx2].copy()
                         fH, fW = face_crop.shape[:2]
                         if fH > 0 and fW > 0:
-                            up_W, up_H = _dynamic_upscale(fH, fW, upscale_crop_face)
-                            face_up = cv2.resize(face_crop, (up_W, up_H),
-                                                 interpolation=cv2.INTER_LANCZOS4)
+                            mouth_bbox = None
+                            mouth_det = _best_mouth_inside_face(
+                                xyxy_d, confs_d, classes_d, face_xyxy_search)
+                            if mouth_det is not None:
+                                (mx1s, my1s, mx2s, my2s), _ = mouth_det
+                                mouth_bbox = (
+                                    max(0, mx1s + ox - bx1),
+                                    max(0, my1s + oy - by1),
+                                    min(fW, mx2s + ox - bx1),
+                                    min(fH, my2s + oy - by1),
+                                )
+                            else:
+                                up_W, up_H = _dynamic_upscale(fH, fW, upscale_crop_face)
+                                face_up = cv2.resize(face_crop, (up_W, up_H),
+                                                     interpolation=cv2.INTER_LANCZOS4)
+                                xyxy_m, confs_m, classes_m = _run_yolo(
+                                    detection_model, face_up, conf_mouth)
+                                fallback = _best_detection(
+                                    xyxy_m, confs_m, classes_m, YOLO_MOUTH_CLASS_ID)
+                                del xyxy_m, confs_m, classes_m, face_up
+                                if fallback is not None:
+                                    (umx1, umy1, umx2, umy2), _ = fallback
+                                    umx1 = max(0, umx1); umy1 = max(0, umy1)
+                                    umx2 = min(up_W, umx2); umy2 = min(up_H, umy2)
 
-                            mouth_model     = YOLO(mouth_model_path)
-                            xyxy_m, confs_m = _run_yolo(mouth_model, face_up, conf_mouth)
-                            del mouth_model
+                                    sx = fW / up_W; sy = fH / up_H
+                                    mouth_bbox = (
+                                        max(0, int(umx1 * sx)),
+                                        max(0, int(umy1 * sy)),
+                                        min(fW, int(umx2 * sx)),
+                                        min(fH, int(umy2 * sy)),
+                                    )
 
-                            if xyxy_m is not None:
-                                mb = int(np.argmax(confs_m))
-                                umx1, umy1, umx2, umy2 = xyxy_m[mb].astype(int)
-                                umx1 = max(0, umx1); umy1 = max(0, umy1)
-                                umx2 = min(up_W, umx2); umy2 = min(up_H, umy2)
-
-                                sx  = fW / up_W; sy = fH / up_H
-                                mx1 = max(0,  int(umx1 * sx))
-                                my1 = max(0,  int(umy1 * sy))
-                                mx2 = min(fW, int(umx2 * sx))
-                                my2 = min(fH, int(umy2 * sy))
+                            if mouth_bbox is not None:
+                                mx1, my1, mx2, my2 = mouth_bbox
+                            if mouth_bbox is not None and mx2 > mx1 and my2 > my1:
 
                                 mask_crop    = build_mask(fH, fW, (mx1, my1, mx2, my2),
                                                           dilation=mask_dilation, blur=0)
@@ -173,10 +222,9 @@ def preprocess_frame(
                                 mask_np[by1:by2, bx1:bx2] = mask_full
                                 del mask_crop, mask_full
 
-                            del face_up
                         del face_crop
 
-                del xyxy_f, confs_f
+                del detection_model, xyxy_d, confs_d, classes_d
 
             fmask_np = np.zeros((H, W), dtype=np.uint8)
             if face_bbox_m is not None:
@@ -212,8 +260,7 @@ def preprocess_frame(
 def run_phase0(
     store: DiskStore,
     n_frames: int,
-    face_model_path: str,
-    mouth_model_path: str,
+    detection_model_path: str,
     vram_safety_mb: int,
     mask_dilation: int,
     mask_blur: int,
@@ -235,7 +282,7 @@ def run_phase0(
     completed = 0
     char_mode = bool(character_bboxes)
 
-    print(f"[F0] {'YOLO face+boca+inpaint' if remove_mouth else 'YOLO somente face'} "
+    print(f"[F0] {'YOLO unico face+boca+inpaint' if remove_mouth else 'YOLO unico somente face'} "
           f"— {n_frames} frames, {n_workers} workers, "
           f"upscale=auto(min={upscale_crop_face:.1f}x, alvo={_TARGET_SIDE_PX}px) conf={mouth_conf}"
           + (" [modo personagem Florence-2]" if char_mode else "") + "...")
@@ -244,7 +291,7 @@ def run_phase0(
         futures = {
             ex.submit(
                 preprocess_frame, i, store,
-                face_model_path, mouth_model_path,
+                detection_model_path,
                 guard, mask_dilation, mask_blur,
                 remove_mouth, upscale_crop_face,
                 0.25, mouth_conf,
