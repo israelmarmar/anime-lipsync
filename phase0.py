@@ -49,30 +49,46 @@ def _dynamic_upscale(fH: int, fW: int, upscale_crop_face: float) -> Tuple[int, i
 
 
 
-def _run_yolo(model, img, conf, imgsz: int = YOLO_IMGSZ):
+def _run_yolo(model, img, conf, imgsz: int = YOLO_IMGSZ, return_masks: bool = False):
     with torch.no_grad():
         results = model.predict(img, verbose=False, conf=conf, imgsz=imgsz)
-    boxes = results[0].boxes
+    result = results[0]
+    boxes = result.boxes
     xyxy = confs = classes = None
+    masks_np = None
     if boxes is not None and len(boxes) > 0:
         xyxy    = boxes.xyxy.cpu().numpy()
         confs   = boxes.conf.cpu().numpy()
         classes = boxes.cls.cpu().numpy().astype(int)
-    del results, boxes
+        result_masks = getattr(result, "masks", None)
+        if return_masks and result_masks is not None and result_masks.data is not None:
+            raw_masks = result_masks.data.cpu().numpy()
+            img_h, img_w = img.shape[:2]
+            masks = []
+            for raw in raw_masks:
+                if raw.shape[:2] != (img_h, img_w):
+                    raw = cv2.resize(raw, (img_w, img_h), interpolation=cv2.INTER_LINEAR)
+                masks.append((raw > 0.5).astype(np.uint8) * 255)
+            masks_np = masks
+    del results, result, boxes
+    if return_masks:
+        return xyxy, confs, classes, masks_np
     return xyxy, confs, classes
 
 
-def _best_detection(xyxy, confs, classes, class_id: int):
+def _best_detection(xyxy, confs, classes, class_id: int, masks=None):
     if xyxy is None or confs is None or classes is None:
         return None
     idxs = np.where(classes == class_id)[0]
     if len(idxs) == 0:
         return None
     best = idxs[int(np.argmax(confs[idxs]))]
+    if masks is not None and best < len(masks):
+        return xyxy[best].astype(int), float(confs[best]), masks[best]
     return xyxy[best].astype(int), float(confs[best])
 
 
-def _best_mouth_inside_face(xyxy, confs, classes, face_bbox):
+def _best_mouth_inside_face(xyxy, confs, classes, face_bbox, masks=None):
     if xyxy is None or confs is None or classes is None or face_bbox is None:
         return None
     fx1, fy1, fx2, fy2 = face_bbox
@@ -86,7 +102,27 @@ def _best_mouth_inside_face(xyxy, confs, classes, face_bbox):
     if not candidates:
         return None
     best = candidates[int(np.argmax(confs[candidates]))]
+    if masks is not None and best < len(masks):
+        return xyxy[best].astype(int), float(confs[best]), masks[best]
     return xyxy[best].astype(int), float(confs[best])
+
+
+def _crop_mask(mask: Optional[np.ndarray],
+               src_box: Tuple[int, int, int, int],
+               dst_shape: Tuple[int, int]) -> Optional[np.ndarray]:
+    if mask is None:
+        return None
+    x1, y1, x2, y2 = src_box
+    h, w = mask.shape[:2]
+    x1 = max(0, min(w, x1)); x2 = max(0, min(w, x2))
+    y1 = max(0, min(h, y1)); y2 = max(0, min(h, y2))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    cropped = mask[y1:y2, x1:x2]
+    dst_h, dst_w = dst_shape
+    if cropped.shape[:2] != (dst_h, dst_w):
+        cropped = cv2.resize(cropped, (dst_w, dst_h), interpolation=cv2.INTER_NEAREST)
+    return cropped
 
 
 def preprocess_frame(
@@ -141,8 +177,8 @@ def preprocess_frame(
 
             if sH > 0 and sW > 0:
                 conf_detect = min(conf_face, conf_mouth)
-                xyxy_d, confs_d, classes_d = _run_yolo(
-                    detection_model, search_img, conf_detect)
+                xyxy_d, confs_d, classes_d, masks_d = _run_yolo(
+                    detection_model, search_img, conf_detect, return_masks=True)
 
                 face_det = _best_detection(
                     xyxy_d, confs_d, classes_d, YOLO_FACE_CLASS_ID)
@@ -165,10 +201,17 @@ def preprocess_frame(
                         fH, fW = face_crop.shape[:2]
                         if fH > 0 and fW > 0:
                             mouth_bbox = None
+                            mouth_mask = None
                             mouth_det = _best_mouth_inside_face(
-                                xyxy_d, confs_d, classes_d, face_xyxy_search)
+                                xyxy_d, confs_d, classes_d, face_xyxy_search, masks_d)
                             if mouth_det is not None:
-                                (mx1s, my1s, mx2s, my2s), _ = mouth_det
+                                (mx1s, my1s, mx2s, my2s), _ = mouth_det[:2]
+                                if len(mouth_det) >= 3:
+                                    mouth_mask = _crop_mask(
+                                        mouth_det[2],
+                                        (bx1 - ox, by1 - oy, bx2 - ox, by2 - oy),
+                                        (fH, fW),
+                                    )
                                 mouth_bbox = (
                                     max(0, mx1s + ox - bx1),
                                     max(0, my1s + oy - by1),
@@ -179,13 +222,17 @@ def preprocess_frame(
                                 up_W, up_H = _dynamic_upscale(fH, fW, upscale_crop_face)
                                 face_up = cv2.resize(face_crop, (up_W, up_H),
                                                      interpolation=cv2.INTER_LANCZOS4)
-                                xyxy_m, confs_m, classes_m = _run_yolo(
-                                    detection_model, face_up, conf_mouth)
+                                xyxy_m, confs_m, classes_m, masks_m = _run_yolo(
+                                    detection_model, face_up, conf_mouth, return_masks=True)
                                 fallback = _best_detection(
-                                    xyxy_m, confs_m, classes_m, YOLO_MOUTH_CLASS_ID)
-                                del xyxy_m, confs_m, classes_m, face_up
+                                    xyxy_m, confs_m, classes_m, YOLO_MOUTH_CLASS_ID, masks_m)
+                                del xyxy_m, confs_m, classes_m, masks_m, face_up
                                 if fallback is not None:
-                                    (umx1, umy1, umx2, umy2), _ = fallback
+                                    (umx1, umy1, umx2, umy2), _ = fallback[:2]
+                                    if len(fallback) >= 3:
+                                        mouth_mask = _crop_mask(
+                                            fallback[2], (0, 0, up_W, up_H), (fH, fW)
+                                        )
                                     umx1 = max(0, umx1); umy1 = max(0, umy1)
                                     umx2 = min(up_W, umx2); umy2 = min(up_H, umy2)
 
@@ -202,14 +249,16 @@ def preprocess_frame(
                             if mouth_bbox is not None and mx2 > mx1 and my2 > my1:
 
                                 mask_crop    = build_mask(fH, fW, (mx1, my1, mx2, my2),
-                                                          dilation=mask_dilation, blur=0)
+                                                          dilation=mask_dilation, blur=0,
+                                                          base_mask=mouth_mask)
                                 face_bgr     = cv2.cvtColor(face_crop, cv2.COLOR_RGB2BGR)
                                 face_inp_bgr = cv2_inpaint(face_bgr, mask_crop)
                                 face_inp     = cv2.cvtColor(face_inp_bgr, cv2.COLOR_BGR2RGB)
                                 del face_bgr, face_inp_bgr
 
                                 mask_full = build_mask(fH, fW, (mx1, my1, mx2, my2),
-                                                       dilation=mask_dilation, blur=mask_blur)
+                                                       dilation=mask_dilation, blur=mask_blur,
+                                                       base_mask=mouth_mask)
                                 alpha  = mask_full.astype(np.float32)[:, :, None] / 255.0
                                 region = img_np[by1:by2, bx1:bx2].astype(np.float32)
                                 inpainted[by1:by2, bx1:bx2] = (
@@ -222,7 +271,7 @@ def preprocess_frame(
 
                         del face_crop
 
-                del xyxy_d, confs_d, classes_d
+                del xyxy_d, confs_d, classes_d, masks_d
 
             fmask_np = np.zeros((H, W), dtype=np.uint8)
             if face_bbox_m is not None:

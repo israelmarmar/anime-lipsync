@@ -211,12 +211,18 @@ def build_video_with_audio(output_dir: Path, audio_path: str,
 # Máscara / inpainting
 # ===========================================================================
 
-def build_mask(H: int, W: int, bbox, dilation: int, blur: int) -> np.ndarray:
+def build_mask(H: int, W: int, bbox, dilation: int, blur: int,
+               base_mask: np.ndarray = None) -> np.ndarray:
     mask = np.zeros((H, W), dtype=np.uint8)
-    if bbox is None:
+    if base_mask is not None and np.max(base_mask) > 0:
+        if base_mask.shape[:2] != (H, W):
+            base_mask = cv2.resize(base_mask, (W, H), interpolation=cv2.INTER_NEAREST)
+        mask = (base_mask > 127).astype(np.uint8) * 255
+    elif bbox is not None:
+        x1, y1, x2, y2 = bbox
+        mask[y1:y2, x1:x2] = 255
+    else:
         return mask
-    x1, y1, x2, y2 = bbox
-    mask[y1:y2, x1:x2] = 255
     if dilation > 0:
         k    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2*dilation+1, 2*dilation+1))
         mask = cv2.dilate(mask, k, iterations=1)
