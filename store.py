@@ -74,6 +74,8 @@ class DiskStore:
     PNG_GOOD = 6
 
     def __init__(self, work_dir: Path):
+        self._mouth_cache_lock = threading.Lock()
+        self._mouth_cache_epoch = 0
         self.work_dir    = work_dir
         self.orig_dir    = work_dir / "preproc" / "original"
         self.nomouth_dir = work_dir / "preproc" / "no_mouth"
@@ -83,11 +85,15 @@ class DiskStore:
         self.faces_dir    = work_dir / "diffusion" / "faces"
         self.history_dir  = work_dir / "diffusion" / "history"
         self.mouths_dir   = work_dir / "diffusion" / "mouths"
+        self.mouth_cache_dir = work_dir / "diffusion" / "mouth_cache"
         self.output_dir   = work_dir / "output"
         self.charbbox_dir = work_dir / "preproc" / "character_bboxes"
+        self.debug_face_frames_dir = work_dir / "debug" / "face_frames"
+        self.debug_face_scribble_frames_dir = work_dir / "debug" / "face_scribble_frames"
         for d in (self.orig_dir, self.nomouth_dir, self.mmask_dir, self.fmask_dir,
                   self.fbbox_dir, self.charbbox_dir, self.faces_dir, self.history_dir,
-                  self.mouths_dir, self.output_dir):
+                  self.mouths_dir, self.mouth_cache_dir, self.output_dir,
+                  self.debug_face_frames_dir, self.debug_face_scribble_frames_dir):
             d.mkdir(parents=True, exist_ok=True)
 
     # ── paths ────────────────────────────────────────────────────────────────
@@ -101,6 +107,8 @@ class DiskStore:
     def _hist_json(self, name, fg):  return self.history_dir / f"{name}_{fg}.json"
     def _mouth_img(self, idx):       return self.mouths_dir  / f"frame_{idx:06d}.{_IMG_EXT}"
     def _mouth_json(self, idx):      return self.mouths_dir  / f"frame_{idx:06d}.json"
+    def _mouth_cache_img(self, name, fg):  return self.mouth_cache_dir / f"{name}_{fg}.{_IMG_EXT}"
+    def _mouth_cache_json(self, name, fg): return self.mouth_cache_dir / f"{name}_{fg}.json"
 
     # ── webp helpers ─────────────────────────────────────────────────────────
 
@@ -136,6 +144,33 @@ class DiskStore:
     def save_face_bbox(self, idx, x1, y1, x2, y2):
         atomic_write(self._p(self.fbbox_dir, idx, "json"),
                      jdumps({"x1": x1, "y1": y1, "x2": x2, "y2": y2}))
+
+    def _debug_image_array(self, arr):
+        if isinstance(arr, torch.Tensor):
+            arr = arr.detach().cpu()
+            if arr.ndim == 4:
+                arr = arr[0]
+            arr = arr.numpy()
+        else:
+            arr = np.asarray(arr)
+        if arr.ndim == 3 and arr.shape[0] in (1, 3, 4) and arr.shape[-1] not in (1, 3, 4):
+            arr = np.moveaxis(arr, 0, -1)
+        if arr.dtype != np.uint8:
+            max_v = float(np.nanmax(arr)) if arr.size else 0.0
+            if max_v <= 1.0:
+                arr = arr * 255.0
+            arr = np.nan_to_num(arr).clip(0, 255).astype(np.uint8)
+        if arr.ndim == 3 and arr.shape[-1] == 1:
+            arr = arr[..., 0]
+        return arr
+
+    def save_debug_face_frame(self, idx, arr):
+        arr = self._debug_image_array(arr)
+        Image.fromarray(arr).save(self._p(self.debug_face_frames_dir, idx))
+        
+    def save_debug_face_scribble_frame(self, idx, arr):
+        arr = self._debug_image_array(arr)
+        Image.fromarray(arr).save(self._p(self.debug_face_scribble_frames_dir, idx))
 
     def save_character_bbox(self, idx, x1, y1, x2, y2):
         atomic_write(self._p(self.charbbox_dir, idx, "json"),
@@ -201,15 +236,17 @@ class DiskStore:
         return jload(self._frame_face_json(idx)) or {}
 
     def save_face_frame(self, idx, arr, mouth_type, face_group, prompt, source,
-                        crop_w=0, crop_h=0):
+                        crop_w=0, crop_h=0, mouth_cache_epoch=0):
         self._save_webp_rgb(self._frame_face_img(idx), arr)
         atomic_write(self._frame_face_json(idx), jdumps({
             "mouth_type": mouth_type, "mouth_type_name": MOUTH_TYPE_NAMES[mouth_type],
             "face_group": face_group, "prompt": prompt, "source": source,
             "w": arr.shape[1], "h": arr.shape[0], "crop_w": crop_w, "crop_h": crop_h,
+            "mouth_cache_epoch": mouth_cache_epoch,
         }))
 
-    def copy_face_to_frame(self, src_img, idx, mouth_type, face_group, prompt):
+    def copy_face_to_frame(self, src_img, idx, mouth_type, face_group, prompt,
+                           mouth_cache_epoch=0):
         atomic_copy(src_img, self._frame_face_img(idx))
         d = jload(src_img.with_suffix(".json")) or {}
         atomic_write(self._frame_face_json(idx), jdumps({
@@ -217,6 +254,7 @@ class DiskStore:
             "face_group": face_group, "prompt": prompt, "source": "history",
             "w": d.get("w", 0), "h": d.get("h", 0),
             "crop_w": d.get("crop_w", 0), "crop_h": d.get("crop_h", 0),
+            "mouth_cache_epoch": mouth_cache_epoch,
         }))
 
     # ── history ───────────────────────────────────────────────────────────────
@@ -251,6 +289,98 @@ class DiskStore:
         d    = jload(self._mouth_json(idx)) or {}
         return rgba, int(d.get("ax", 0)), int(d.get("ay", 0)), \
                int(d.get("aw", 0)), int(d.get("ah", 0))
+
+    def clear_mouth_cache(self):
+        removed = 0
+        with self._mouth_cache_lock:
+            for p in self.mouth_cache_dir.iterdir():
+                if p.is_file():
+                    try:
+                        p.unlink()
+                        removed += 1
+                    except OSError:
+                        pass
+        return removed
+
+    def _mouth_cache_meta_valid(self, meta: dict, epoch=None) -> bool:
+        required = ("ax", "ay", "aw", "ah")
+        if not all(k in meta for k in required):
+            return False
+        try:
+            if int(meta.get("position_schema", 0)) != 2:
+                return False
+            if int(meta.get("aw", 0)) <= 0 or int(meta.get("ah", 0)) <= 0:
+                return False
+            if any(k in meta for k in ("gx", "gy", "gw", "gh")):
+                if not all(k in meta for k in ("gx", "gy", "gw", "gh")):
+                    return False
+                if int(meta.get("gw", 0)) <= 0 or int(meta.get("gh", 0)) <= 0:
+                    return False
+            if epoch is not None and int(meta.get("mouth_cache_epoch", -1)) != int(epoch):
+                return False
+        except Exception:
+            return False
+        return True
+
+    def reset_mouth_cache_epoch(self, epoch: int) -> bool:
+        with self._mouth_cache_lock:
+            cur = getattr(self, "_mouth_cache_epoch", None)
+            if cur == epoch:
+                return False
+            self._mouth_cache_epoch = epoch
+        self.clear_mouth_cache()
+        return True
+
+    def has_mouth_cache(self, mt, fg, epoch=None):
+        name = MOUTH_TYPE_NAMES[mt]
+        img_path = self._mouth_cache_img(name, fg)
+        json_path = self._mouth_cache_json(name, fg)
+        if not img_path.exists() or not json_path.exists():
+            return False
+        meta = jload(json_path) or {}
+        return self._mouth_cache_meta_valid(meta, epoch=epoch)
+
+    def save_mouth_cache(self, mt, fg, rgba, pos, epoch=0,
+                         source_frame=None, generated_face_shape=None):
+        name = MOUTH_TYPE_NAMES[mt]
+        face_h = face_w = 0
+        if generated_face_shape is not None:
+            face_h, face_w = generated_face_shape[:2]
+        with self._mouth_cache_lock:
+            self._save_webp_rgba(self._mouth_cache_img(name, fg), rgba)
+            meta = {
+                "mouth_type": mt,
+                "mouth_type_name": name,
+                "face_group": fg,
+                "mouth_cache_epoch": epoch,
+                "position_source": "generated_face",
+                "position_schema": 2,
+                "source_frame": source_frame,
+                "generated_face_w": face_w,
+                "generated_face_h": face_h,
+                "ax": pos["ax"],
+                "ay": pos["ay"],
+                "aw": pos["aw"],
+                "ah": pos["ah"],
+                "rgba_w": rgba.shape[1],
+                "rgba_h": rgba.shape[0],
+            }
+            if all(k in pos for k in ("gx", "gy", "gw", "gh")):
+                meta.update({
+                    "gx": pos["gx"],
+                    "gy": pos["gy"],
+                    "gw": pos["gw"],
+                    "gh": pos["gh"],
+                })
+            atomic_write(self._mouth_cache_json(name, fg), jdumps(meta))
+
+    def load_mouth_cache(self, mt, fg):
+        name = MOUTH_TYPE_NAMES[mt]
+        rgba = np.array(Image.open(self._mouth_cache_img(name, fg)).convert("RGBA"), dtype=np.uint8)
+        meta = jload(self._mouth_cache_json(name, fg)) or {}
+        if not self._mouth_cache_meta_valid(meta):
+            raise ValueError(f"cache de boca sem posição absoluta válida: {name}_{fg}")
+        return rgba, meta
 
     # ── output ────────────────────────────────────────────────────────────────
 

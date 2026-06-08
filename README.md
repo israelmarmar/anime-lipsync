@@ -33,7 +33,7 @@ O pipeline trabalha em quatro fases:
      - `half_open`
      - `fully_open`
    - Agrupa faces por similaridade usando um mapa de **scribble**/contornos da face, mais preciso para variações de pose e linhas de anime.
-   - Usa HED/ControlNet + Z-Image Turbo/Qwen DiffSynth para gerar as faces com a boca correta.
+   - Usa `controlnet_aux.HEDdetector` em modo **scribble** para gerar o mapa de controle, com fallback para HEDPreprocessor, e então ControlNet + Z-Image Turbo/Qwen DiffSynth para gerar as faces com a boca correta.
 
 3. **Fase 2 - recorte da boca gerada**
    - Detecta a boca gerada frame a frame com o mesmo YOLO.
@@ -121,6 +121,10 @@ Ele usa:
 - `mouth_conf`: confiança mínima para detecção da boca no YOLO.
 - `upscale_crop_face`: upscale mínimo do crop da face antes de detectar a boca.
 - `remove_mouth`: remove a boca original antes da diffusion.
+- `hed_detector_mode`: fonte do mapa HED/scribble para o ControlNet:
+  - `auto`: tenta `controlnet_aux.HEDdetector(scribble=True)` e cai para `HEDPreprocessor`.
+  - `controlnet_aux`: força `controlnet_aux.HEDdetector`; falha se a dependência/modelo não estiver disponível.
+  - `comfy_hed`: força o `HEDPreprocessor` do ComfyUI.
 - `mask_dilation`: expansão da máscara de inpaint da boca original.
 - `mask_blur`: suavização da máscara no inpaint.
 - `compose_feather_px`: feather da composição final.
@@ -225,6 +229,7 @@ Além do ComfyUI e dos nodes usados pelo workflow, o pipeline usa:
 - `torch`.
 - `Pillow`.
 - `allosaurus` para fonemas.
+- `controlnet_aux` opcional/recomendado para HEDdetector em modo scribble.
 - `skimage` opcional para SSIM.
 - `rembg` opcional para refino de alpha das bocas abertas.
 - `transformers`, `timm`, `einops` se usar Florence-2.

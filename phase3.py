@@ -150,8 +150,7 @@ def _overlap_worker(worker_id: int,
             break
 
         try:
-            local: Dict = {}
-            process_single(q, store, mouth_types, detection_model, local,
+            process_single(q, store, mouth_types, detection_model, canonical_cache,
                            upscale_crop_face, conf_mouth,
                            mouth_padding_per_type, mouth_brightness_per_type,
                            use_rembg=use_rembg)

@@ -130,6 +130,35 @@ def _face_signature_stable(prev_sig, sig,
     return gray_diff <= gray_threshold and edge_diff <= edge_threshold
 
 
+def _mouth_cached_pos_to_frame(pos: dict,
+                               frame_shape: Tuple[int, int],
+                               face_bbox=None) -> Tuple[int, int, int, int]:
+    H_fr, W_fr = frame_shape
+    if face_bbox is not None and all(k in pos for k in ("gx", "gy", "gw", "gh")):
+        fx1, fy1, fx2, fy2 = face_bbox
+        face_w = max(1, int(fx2) - int(fx1))
+        face_h = max(1, int(fy2) - int(fy1))
+        src_w = int(pos.get("generated_face_w", 0)) or face_w
+        src_h = int(pos.get("generated_face_h", 0)) or face_h
+        sx = face_w / max(1, src_w)
+        sy = face_h / max(1, src_h)
+        ax = int(fx1) + int(round(int(pos.get("gx", 0)) * sx))
+        ay = int(fy1) + int(round(int(pos.get("gy", 0)) * sy))
+        aw = int(round(int(pos.get("gw", 0)) * sx))
+        ah = int(round(int(pos.get("gh", 0)) * sy))
+    else:
+        ax = int(pos.get("ax", 0))
+        ay = int(pos.get("ay", 0))
+        aw = int(pos.get("aw", 0))
+        ah = int(pos.get("ah", 0))
+
+    ax = max(0, min(W_fr - 1, ax))
+    ay = max(0, min(H_fr - 1, ay))
+    aw = min(max(1, aw), W_fr - ax)
+    ah = min(max(1, ah), H_fr - ay)
+    return ax, ay, aw, ah
+
+
 def _detect_mouth(face_np: np.ndarray,
                   face_meta: dict,
                   face_bbox,
@@ -256,11 +285,15 @@ def _detect_mouth(face_np: np.ndarray,
 
     del mouth_crop
 
-    # Remap 1:1 — face_np já está em crop_w_orig × crop_h_orig
-    abs_x = max(0, min(W_fr - 1, fx1 + bx1))
-    abs_y = max(0, min(H_fr - 1, fy1 + by1))
-    abs_w = min(max(1, bx2 - bx1), W_fr - abs_x)
-    abs_h = min(max(1, by2 - by1), H_fr - abs_y)
+    target_w = max(1, int(fx2) - int(fx1))
+    target_h = max(1, int(fy2) - int(fy1))
+    frame_sx = target_w / max(1, fW)
+    frame_sy = target_h / max(1, fH)
+
+    abs_x = max(0, min(W_fr - 1, int(fx1) + int(round(bx1 * frame_sx))))
+    abs_y = max(0, min(H_fr - 1, int(fy1) + int(round(by1 * frame_sy))))
+    abs_w = min(max(1, int(round((bx2 - bx1) * frame_sx))), W_fr - abs_x)
+    abs_h = min(max(1, int(round((by2 - by1) * frame_sy))), H_fr - abs_y)
 
     return mouth_rgba, abs_x, abs_y, abs_w, abs_h
 
@@ -426,6 +459,7 @@ def process_single(q: int,
     mt        = mouth_types[q]
     meta      = store.load_face_frame_meta(q)
     fg        = int(meta.get("face_group", 0))
+    epoch     = int(meta.get("mouth_cache_epoch", fg))
 
     if not store.has_face_frame(q):
         store.save_mouth_frame(q, np.zeros((4, 4, 4), dtype=np.uint8), 0, 0, 0, 0)
@@ -443,6 +477,39 @@ def process_single(q: int,
         store.save_mouth_frame(q, np.zeros((4, 4, 4), dtype=np.uint8), 0, 0, 0, 0)
         return
 
+    """
+    if bbox_cache.get("_mouth_cache_epoch") != epoch:
+        bbox_cache.clear()
+        bbox_cache["_mouth_cache_epoch"] = epoch
+    if store.reset_mouth_cache_epoch(epoch):
+        bbox_cache.clear()
+        bbox_cache["_mouth_cache_epoch"] = epoch
+        print(f"  [F2] Variação de face detectada → caches closed/half/open limpos (epoch={epoch})")
+    """
+
+    cache_key = (epoch, mt, fg)
+    cached = bbox_cache.get(cache_key)
+    if cached is None and store.has_mouth_cache(mt, fg, epoch=epoch):
+        try:
+            cached_rgba, cached_meta = store.load_mouth_cache(mt, fg)
+            cached = {"rgba": cached_rgba, "pos": cached_meta}
+            bbox_cache[cache_key] = cached
+        except Exception as exc:
+            print(f"  [F2] Cache de boca inválido {MOUTH_TYPE_NAMES[mt]} fg={fg}: {exc}")
+
+    if cached is not None:
+        try:
+            ax, ay, aw, ah = _mouth_cached_pos_to_frame(
+                cached["pos"], nomouth_shape, face_bbox)
+
+            store.save_mouth_frame(q, cached["rgba"], ax, ay, aw, ah)
+            if q % 20 == 0:
+                print(f"  [F2] Boca cache {MOUTH_TYPE_NAMES[mt]} fg={fg} frame{q} "
+                      f"→ ({ax},{ay}) {aw}×{ah}px")
+            return
+        except Exception as exc:
+            print(f"  [F2] Falha aplicando cache de boca {MOUTH_TYPE_NAMES[mt]} fg={fg}: {exc}")
+
     result = _detect_mouth(face_np, face_meta, face_bbox, nomouth_shape,
                            detection_model, upscale_crop_face, conf_mouth,
                            mouth_type=mt,
@@ -455,6 +522,36 @@ def process_single(q: int,
         return
 
     store.save_mouth_frame(q, *result)
+    try:
+        rgba, ax, ay, aw, ah = result
+        pos = {"ax": ax, "ay": ay, "aw": aw, "ah": ah}
+        cache_ref_shape = face_np.shape
+        if face_bbox is not None:
+            fx1, fy1, fx2, fy2 = face_bbox
+            cache_ref_shape = (
+                max(1, int(fy2) - int(fy1)),
+                max(1, int(fx2) - int(fx1)),
+            )
+            pos.update({
+                "gx": ax - int(fx1),
+                "gy": ay - int(fy1),
+                "gw": aw,
+                "gh": ah,
+                "generated_face_w": cache_ref_shape[1],
+                "generated_face_h": cache_ref_shape[0],
+            })
+        cached = {"rgba": rgba, "pos": pos}
+        bbox_cache[cache_key] = cached
+        if not store.has_mouth_cache(mt, fg, epoch=epoch):
+            store.save_mouth_cache(
+                mt, fg, rgba, pos,
+                epoch=epoch,
+                source_frame=q,
+                generated_face_shape=cache_ref_shape,
+            )
+    except Exception as exc:
+        print(f"  [F2] Falha salvando cache de boca {MOUTH_TYPE_NAMES[mt]} fg={fg}: {exc}")
+
     if q % 20 == 0:
         print(f"  [F2] Boca {MOUTH_TYPE_NAMES[mt]} fg={fg} frame{q} "
               f"→ ({result[1]},{result[2]}) {result[3]}×{result[4]}px")
@@ -517,28 +614,48 @@ def run_phase2(store: DiskStore,
           f"padding={mouth_padding_per_type} brightness={mouth_brightness_per_type} "
           f"rembg={'on' if use_rembg and _REMBG_AVAILABLE else 'off'}...")
 
-    chunks = [list(range(i, n_frames, n_workers)) for i in range(n_workers)]
-    chunks = [chunk for chunk in chunks if chunk]
     completed = 0
     log_step = max(1, n_frames // 10)
 
-    with ThreadPoolExecutor(max_workers=len(chunks)) as ex:
-        futures = {
-            ex.submit(_worker_batch, worker_id, chunk, store, mouth_types,
-                      detection_model_path, upscale_crop_face, conf_mouth,
-                      mouth_padding_per_type, mouth_brightness_per_type,
-                      use_rembg): worker_id
-            for worker_id, chunk in enumerate(chunks)
-        }
-        for future in as_completed(futures):
-            try:
-                completed += future.result()
-            except Exception as e:
-                print(f"[F2] Worker falhou: {e}")
-            if completed % log_step == 0 or completed == n_frames:
-                print(f"[F2] {completed}/{n_frames} detectados")
+    epoch_ranges = []
+    start = 0
+    cur_epoch = None
+    for q in range(n_frames):
+        meta = store.load_face_frame_meta(q) if store.has_face_frame(q) else {}
+        epoch = int(meta.get("mouth_cache_epoch", meta.get("face_group", 0)))
+        if cur_epoch is None:
+            cur_epoch = epoch
+        elif epoch != cur_epoch:
+            epoch_ranges.append((cur_epoch, list(range(start, q))))
+            start = q
+            cur_epoch = epoch
+    if cur_epoch is not None:
+        epoch_ranges.append((cur_epoch, list(range(start, n_frames))))
 
-    smooth_mouth_tracks(store, mouth_types, n_frames)
+    for epoch, frames in epoch_ranges:
+        if store.reset_mouth_cache_epoch(epoch):
+            print(f"[F2] Variação de face detectada → caches closed/half/open limpos (epoch={epoch})")
+
+        chunks = [frames[i::n_workers] for i in range(n_workers)]
+        chunks = [chunk for chunk in chunks if chunk]
+
+        with ThreadPoolExecutor(max_workers=len(chunks)) as ex:
+            futures = {
+                ex.submit(_worker_batch, worker_id, chunk, store, mouth_types,
+                          detection_model_path, upscale_crop_face, conf_mouth,
+                          mouth_padding_per_type, mouth_brightness_per_type,
+                          use_rembg): worker_id
+                for worker_id, chunk in enumerate(chunks)
+            }
+            for future in as_completed(futures):
+                try:
+                    completed += future.result()
+                except Exception as e:
+                    print(f"[F2] Worker falhou: {e}")
+                if completed % log_step == 0 or completed == n_frames:
+                    print(f"[F2] {completed}/{n_frames} detectados")
+
+    #smooth_mouth_tracks(store, mouth_types, n_frames)
 
     cuda_cleanup()
     print(f"[F2] Concluída. {vram_info()}")

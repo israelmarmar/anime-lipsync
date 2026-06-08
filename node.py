@@ -87,6 +87,14 @@ class LipSyncZTurboPipeline:
                 "upscale_crop_face":     ("FLOAT",   {"default": 2.0,  "min": 1.0,  "max": 10.0,  "step": 0.5}),
                 "mouth_conf":            ("FLOAT",   {"default": 0.1,  "min": 0.01, "max": 1.0,   "step": 0.01}),
                 "remove_mouth":          ("BOOLEAN", {"default": True}),
+                "hed_detector_mode":      (["auto", "controlnet_aux", "comfy_hed"], {
+                    "default": "auto",
+                    "tooltip": (
+                        "Fonte do mapa HED/scribble usado no ControlNet. "
+                        "controlnet_aux usa HEDdetector(scribble); auto cai para HEDPreprocessor; "
+                        "comfy_hed força o node HEDPreprocessor do ComfyUI."
+                    ),
+                }),
                 # ── Padding de boca por tipo ────────────────────────────────────
                 "mouth_padding_closed": ("INT",   {"default": 0,   "min": 0,   "max": 64, "tooltip": "Padding (px) do recorte da boca neutral_closed antes do rembg/composicao."}),
                 "mouth_padding_half":   ("INT",   {"default": 0,   "min": 0,   "max": 64, "tooltip": "Padding (px) do recorte da boca half_open antes do rembg/composicao."}),
@@ -179,6 +187,7 @@ class LipSyncZTurboPipeline:
         upscale_crop_face: float = 2.0,
         mouth_conf: float = 0.1,
         remove_mouth: bool = True,
+        hed_detector_mode: str = "auto",
         # Padding por tipo
         mouth_padding_closed: int = 0,
         mouth_padding_half: int = 0,
@@ -342,6 +351,7 @@ class LipSyncZTurboPipeline:
                         ready_queue=ready_queue,
                         upscale_crop_face=upscale_crop_face,
                         lora_cfg=lora_cfg,
+                        hed_detector_mode=hed_detector_mode,
                     )
 
                 timeout_s = n_frames * 5 + 120
@@ -350,7 +360,7 @@ class LipSyncZTurboPipeline:
                     if t.is_alive():
                         print(f"[Overlap] Worker {t.name} não finalizou.")
                 stop_event.set()
-                smooth_mouth_tracks(store, mouth_types_list, n_frames)
+                #smooth_mouth_tracks(store, mouth_types_list, n_frames)
                 n_workers_f3 = compute_workers(vram_safety_margin_mb)
                 run_phase3(store, n_frames, compose_feather_px, n_workers_f3)
                 ensure_all_outputs(store, n_frames, compose_feather_px)
@@ -368,6 +378,7 @@ class LipSyncZTurboPipeline:
                         ready_queue=None,
                         upscale_crop_face=upscale_crop_face,
                         lora_cfg=lora_cfg,
+                        hed_detector_mode=hed_detector_mode,
                     )
 
                 n_workers_f2 = compute_workers(vram_safety_margin_mb)
