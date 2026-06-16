@@ -307,7 +307,7 @@ class DiskStore:
         if not all(k in meta for k in required):
             return False
         try:
-            if int(meta.get("position_schema", 0)) != 2:
+            if int(meta.get("position_schema", 0)) != 3:
                 return False
             if int(meta.get("aw", 0)) <= 0 or int(meta.get("ah", 0)) <= 0:
                 return False
@@ -315,6 +315,11 @@ class DiskStore:
                 if not all(k in meta for k in ("gx", "gy", "gw", "gh")):
                     return False
                 if int(meta.get("gw", 0)) <= 0 or int(meta.get("gh", 0)) <= 0:
+                    return False
+            if any(k in meta for k in ("ref_fx1", "ref_fy1", "ref_fw", "ref_fh")):
+                if not all(k in meta for k in ("ref_fx1", "ref_fy1", "ref_fw", "ref_fh")):
+                    return False
+                if int(meta.get("ref_fw", 0)) <= 0 or int(meta.get("ref_fh", 0)) <= 0:
                     return False
             if epoch is not None and int(meta.get("mouth_cache_epoch", -1)) != int(epoch):
                 return False
@@ -354,7 +359,7 @@ class DiskStore:
                 "face_group": fg,
                 "mouth_cache_epoch": epoch,
                 "position_source": "generated_face",
-                "position_schema": 2,
+                "position_schema": 3,
                 "source_frame": source_frame,
                 "generated_face_w": face_w,
                 "generated_face_h": face_h,
@@ -371,6 +376,13 @@ class DiskStore:
                     "gy": pos["gy"],
                     "gw": pos["gw"],
                     "gh": pos["gh"],
+                })
+            if all(k in pos for k in ("ref_fx1", "ref_fy1", "ref_fw", "ref_fh")):
+                meta.update({
+                    "ref_fx1": pos["ref_fx1"],
+                    "ref_fy1": pos["ref_fy1"],
+                    "ref_fw": pos["ref_fw"],
+                    "ref_fh": pos["ref_fh"],
                 })
             atomic_write(self._mouth_cache_json(name, fg), jdumps(meta))
 

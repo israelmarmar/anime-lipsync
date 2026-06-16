@@ -95,6 +95,30 @@ def _face_crop_feature(rgb) -> np.ndarray:
     return clahe.apply(gray)
 
 
+def _face_bbox_moved(prev_bbox, bbox, motion_variance_factor: float = 0.001) -> Tuple[bool, float]:
+    if prev_bbox is None and bbox is None:
+        return False, 0.0
+    if prev_bbox is None or bbox is None:
+        return True, 1.0
+
+    px1, py1, px2, py2 = [float(v) for v in prev_bbox]
+    x1, y1, x2, y2 = [float(v) for v in bbox]
+    pw = max(1.0, px2 - px1)
+    ph = max(1.0, py2 - py1)
+    w = max(1.0, x2 - x1)
+    h = max(1.0, y2 - y1)
+
+    pcx = (px1 + px2) * 0.5
+    pcy = (py1 + py2) * 0.5
+    cx = (x1 + x2) * 0.5
+    cy = (y1 + y2) * 0.5
+    ref_side = max(1.0, (pw + ph + w + h) * 0.25)
+    center_delta = max(abs(cx - pcx), abs(cy - pcy)) / ref_side
+    size_delta = max(abs(w - pw) / pw, abs(h - ph) / ph)
+    motion = max(center_delta, size_delta)
+    return motion > float(motion_variance_factor), motion
+
+
 def _scribble_to_uint8_array(scribble, target_shape) -> np.ndarray:
     if isinstance(scribble, torch.Tensor):
         arr = scribble.detach().cpu()
@@ -298,6 +322,7 @@ def run_phase1(store: DiskStore,
                upscale_crop_face: float = 1.0,
                lora_cfg: Optional[Dict[int, dict]] = None,
                hed_detector_mode: str = "auto",
+               motion_variance_factor: float = 0.001,
                ) -> None:
     """
     lora_cfg formato:
@@ -361,10 +386,12 @@ def run_phase1(store: DiskStore,
     # ── Passo 1: face_groups ─────────────────────────────────────────────────
     import cv2 as _cv2
 
-    print(f"\n[F1] Passo 1/4: face_groups por crop da face sem boca ({n_frames} frames)...")
+    print(f"\n[F1] Passo 1/4: face_groups por crop + movimento da face ({n_frames} frames)...")
     print(f"  [Debug] face_frames: {store.debug_face_frames_dir}")
-    face_group = 0
-    last_feat  = None
+    face_group        = 0
+    mouth_cache_epoch = 0
+    last_feat         = None
+    last_face_bbox    = None
     frame_meta: List[Tuple[int, int, int, int]] = []
 
     for q in range(n_frames):
@@ -383,14 +410,24 @@ def run_phase1(store: DiskStore,
         
         if last_feat is not None:
             sim = _face_similarity(last_feat, feat)
+            moved, motion = _face_bbox_moved(
+                last_face_bbox, face_bbox, motion_variance_factor)
+            if sim <= sim_threshold or moved:
+                removed = store.clear_mouth_cache()
             if sim <= sim_threshold:
                 face_group += 1
-                removed = store.clear_mouth_cache()
+                mouth_cache_epoch += 1
                 print(f"  [F1] Crop da face sem boca mudou frame {q} "
                       f"(sim={sim:.3f}) → group={face_group}; "
                       f"caches closed/half/open limpos ({removed} arquivos)")
+            elif moved:
+                mouth_cache_epoch += 1
+                print(f"  [F1] Movimento da face detectado frame {q} "
+                      f"(motion={motion:.3f}, sim={sim:.3f}) → mouth_epoch={mouth_cache_epoch}; "
+                      f"caches closed/half/open limpos ({removed} arquivos)")
         last_feat = feat
-        frame_meta.append((q, mt, face_group, face_group))
+        last_face_bbox = face_bbox
+        frame_meta.append((q, mt, face_group, mouth_cache_epoch))
         del face_frame, orig, nomouth
 
     # ── Passo 2: pares únicos ────────────────────────────────────────────────
@@ -546,11 +583,6 @@ def run_phase1(store: DiskStore,
 
 
     for q, mt, fg, epoch in frame_meta:
-        if store.has_face_frame(q):
-            if ready_queue is not None:
-                ready_queue.put(q)
-            continue
-
         store.copy_face_to_frame(
             store.load_history_img_path(mt, fg), q, mt, fg, MOUTH_TYPE_PROMPTS[mt],
             mouth_cache_epoch=epoch)

@@ -78,6 +78,10 @@ class LipSyncZTurboPipeline:
                 "source_fps":            ("FLOAT",   {"default": 12.0, "min": 0.1,  "max": 120.0}),
                 "lang_id":               ("STRING",  {"default": "uni", "multiline": False}),
                 "sim_threshold":         ("FLOAT",   {"default": 0.92, "min": 0.0,  "max": 1.0,   "step": 0.01}),
+                "motion_variance_factor": ("FLOAT",  {
+                    "default": 0.001, "min": 0.0, "max": 0.2, "step": 0.001,
+                    "tooltip": "Limiar relativo de movimento do bbox da face para reiniciar caches de boca. Menor = mais sensivel."
+                }),
                 "mask_dilation":         ("INT",     {"default": 8,    "min": 0,    "max": 64}),
                 "mask_blur":             ("INT",     {"default": 5,    "min": 0,    "max": 31}),
                 "vram_safety_margin_mb": ("INT",     {"default": 1024, "min": 256,  "max": 16384, "step": 256}),
@@ -179,6 +183,7 @@ class LipSyncZTurboPipeline:
         # Geral
         fps: int = 12, source_fps: float = 12.0,
         lang_id: str = "uni", sim_threshold: float = 0.92,
+        motion_variance_factor: float = 0.001,
         mask_dilation: int = 8, mask_blur: int = 5,
         vram_safety_margin_mb: int = 1024,
         compose_feather_px: int = 2,
@@ -352,6 +357,7 @@ class LipSyncZTurboPipeline:
                         upscale_crop_face=upscale_crop_face,
                         lora_cfg=lora_cfg,
                         hed_detector_mode=hed_detector_mode,
+                        motion_variance_factor=motion_variance_factor,
                     )
 
                 timeout_s = n_frames * 5 + 120
@@ -379,6 +385,7 @@ class LipSyncZTurboPipeline:
                         upscale_crop_face=upscale_crop_face,
                         lora_cfg=lora_cfg,
                         hed_detector_mode=hed_detector_mode,
+                        motion_variance_factor=motion_variance_factor,
                     )
 
                 n_workers_f2 = compute_workers(vram_safety_margin_mb)

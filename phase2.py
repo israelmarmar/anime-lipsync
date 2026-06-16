@@ -134,7 +134,34 @@ def _mouth_cached_pos_to_frame(pos: dict,
                                frame_shape: Tuple[int, int],
                                face_bbox=None) -> Tuple[int, int, int, int]:
     H_fr, W_fr = frame_shape
-    if face_bbox is not None and all(k in pos for k in ("gx", "gy", "gw", "gh")):
+    if face_bbox is not None and all(k in pos for k in ("ref_fx1", "ref_fy1", "ref_fw", "ref_fh")):
+        fx1, fy1, fx2, fy2 = face_bbox
+        face_w = max(1, int(fx2) - int(fx1))
+        face_h = max(1, int(fy2) - int(fy1))
+        ref_fx1 = int(pos.get("ref_fx1", 0))
+        ref_fy1 = int(pos.get("ref_fy1", 0))
+        ref_fw = max(1, int(pos.get("ref_fw", 1)))
+        ref_fh = max(1, int(pos.get("ref_fh", 1)))
+        still_tol = max(4, int(round(max(ref_fw, ref_fh) * 0.03)))
+        face_still = (
+            abs(int(fx1) - ref_fx1) <= still_tol and
+            abs(int(fy1) - ref_fy1) <= still_tol and
+            abs(face_w - ref_fw) <= still_tol and
+            abs(face_h - ref_fh) <= still_tol
+        )
+        if face_still:
+            ax = int(pos.get("ax", 0))
+            ay = int(pos.get("ay", 0))
+            aw = int(pos.get("aw", 0))
+            ah = int(pos.get("ah", 0))
+        else:
+            sx = face_w / ref_fw
+            sy = face_h / ref_fh
+            ax = int(fx1) + int(round(int(pos.get("gx", 0)) * sx))
+            ay = int(fy1) + int(round(int(pos.get("gy", 0)) * sy))
+            aw = int(round(int(pos.get("gw", 0)) * sx))
+            ah = int(round(int(pos.get("gh", 0)) * sy))
+    elif face_bbox is not None and all(k in pos for k in ("gx", "gy", "gw", "gh")):
         fx1, fy1, fx2, fy2 = face_bbox
         face_w = max(1, int(fx2) - int(fx1))
         face_h = max(1, int(fy2) - int(fy1))
@@ -537,6 +564,10 @@ def process_single(q: int,
                 "gy": ay - int(fy1),
                 "gw": aw,
                 "gh": ah,
+                "ref_fx1": int(fx1),
+                "ref_fy1": int(fy1),
+                "ref_fw": cache_ref_shape[1],
+                "ref_fh": cache_ref_shape[0],
                 "generated_face_w": cache_ref_shape[1],
                 "generated_face_h": cache_ref_shape[0],
             })
