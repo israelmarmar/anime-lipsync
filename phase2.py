@@ -12,9 +12,24 @@ from .phase0 import _best_detection, _dynamic_upscale, _run_yolo, YOLO_MOUTH_CLA
 
 try:
     from rembg import remove as _rembg_remove
+    try:
+        from rembg import new_session as _rembg_new_session
+    except ImportError:
+        _rembg_new_session = None
     _REMBG_AVAILABLE = True
 except ImportError:
+    _rembg_new_session = None
     _REMBG_AVAILABLE = False
+
+
+def _make_rembg_session():
+    if not _REMBG_AVAILABLE or _rembg_new_session is None:
+        return None
+    try:
+        return _rembg_new_session()
+    except Exception as exc:
+        print(f"[F2] Falha criando sessão rembg; usando remove direto: {exc}")
+        return None
 
 
 def _expand_bbox(bx1: int, by1: int, bx2: int, by2: int,
@@ -52,29 +67,90 @@ def _ellipse_mask(h: int, w: int, scale_x: float, scale_y: float,
     return cv2.GaussianBlur(mask, (k, k), 0).astype(np.float32) / 255.0
 
 
+def _rembg_rgba(mouth_crop: np.ndarray, rembg_session=None) -> np.ndarray:
+    image = Image.fromarray(mouth_crop)
+    if rembg_session is not None:
+        try:
+            return np.array(
+                _rembg_remove(image, session=rembg_session).convert("RGBA"), dtype=np.uint8)
+        except TypeError:
+            pass
+    return np.array(_rembg_remove(image).convert("RGBA"), dtype=np.uint8)
+
+
+def _center_component_filter(alpha: np.ndarray,
+                             support: np.ndarray,
+                             max_components: int = 3) -> np.ndarray:
+    h, w = alpha.shape[:2]
+    if h <= 2 or w <= 2:
+        return alpha
+
+    mask = ((alpha > 0.10) & (support > 0.04)).astype(np.uint8)
+    n_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, 8)
+    if n_labels <= 1:
+        return alpha
+
+    cx = (w - 1) * 0.5
+    cy = (h - 1) * 0.5
+    max_dist = max(1.0, (cx * cx + cy * cy) ** 0.5)
+    min_area = max(4, int(round(h * w * 0.002)))
+    ranked = []
+    for label in range(1, n_labels):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < min_area:
+            continue
+        lx, ly = centroids[label]
+        dist = (((lx - cx) ** 2 + (ly - cy) ** 2) ** 0.5) / max_dist
+        comp = labels == label
+        support_mean = float(np.mean(support[comp])) if np.any(comp) else 0.0
+        score = area * (0.35 + support_mean) * (1.05 - min(1.0, dist))
+        ranked.append((score, label))
+
+    if not ranked:
+        return alpha
+
+    keep = np.zeros_like(mask)
+    for _, label in sorted(ranked, reverse=True)[:max_components]:
+        keep[labels == label] = 1
+
+    keep = cv2.dilate(
+        keep,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+        iterations=1,
+    ).astype(np.float32)
+    keep = cv2.GaussianBlur(keep, (3, 3), 0)
+    return alpha * np.clip(keep, 0.0, 1.0)
+
+
 def _open_mouth_rgba(mouth_crop: np.ndarray, mouth_type: int,
-                     use_rembg: bool = False) -> np.ndarray:
+                     use_rembg: bool = False,
+                     rembg_session=None) -> np.ndarray:
     if use_rembg and _REMBG_AVAILABLE:
-        rembg_rgba = np.array(
-            _rembg_remove(Image.fromarray(mouth_crop)).convert("RGBA"), dtype=np.uint8)
+        rembg_rgba = _rembg_rgba(mouth_crop, rembg_session=rembg_session)
         rembg_alpha = rembg_rgba[:, :, 3].astype(np.float32) / 255.0
     else:
         rembg_alpha = np.ones(mouth_crop.shape[:2], dtype=np.float32)
 
     h, w = mouth_crop.shape[:2]
     hsv = cv2.cvtColor(mouth_crop, cv2.COLOR_RGB2HSV)
+    hue = hsv[:, :, 0].astype(np.float32) / 179.0
     sat = hsv[:, :, 1].astype(np.float32) / 255.0
     gray = cv2.cvtColor(mouth_crop, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
 
     r = mouth_crop[:, :, 0].astype(np.int16)
     g = mouth_crop[:, :, 1].astype(np.int16)
     b = mouth_crop[:, :, 2].astype(np.int16)
+    r_f = r.astype(np.float32)
     red_bias = ((r > g + 8) & (r > b + 4)).astype(np.float32)
+    pink_hue = (((hue < 0.07) | (hue > 0.88)) & (sat > 0.18)).astype(np.float32)
+    dark_score = np.clip((0.58 - gray) / 0.32, 0.0, 1.0)
+    sat_score = np.clip((sat - 0.24) / 0.42, 0.0, 1.0)
+    red_score = np.maximum(red_bias, pink_hue) * np.clip((r_f - 58.0) / 130.0, 0.0, 1.0)
 
     dark_or_color = np.maximum.reduce([
-        np.clip((0.60 - gray) / 0.34, 0.0, 1.0),
-        np.clip((sat - 0.30) / 0.38, 0.0, 1.0),
-        red_bias * np.clip((r.astype(np.float32) - 80.0) / 140.0, 0.0, 1.0),
+        dark_score,
+        sat_score,
+        red_score,
     ])
 
     edges = cv2.Canny((gray * 255).astype(np.uint8), 35, 110)
@@ -84,11 +160,33 @@ def _open_mouth_rgba(mouth_crop: np.ndarray, mouth_type: int,
 
     ellipse = _ellipse_mask(h, w, 0.43, 0.39 if mouth_type == 1 else 0.43)
     edge_support = cv2.GaussianBlur(dark_or_color, (5, 5), 0)
-    alpha = np.maximum(rembg_alpha * dark_or_color, edge_mask * edge_support * 0.85)
-    alpha = np.maximum(alpha, dark_or_color * 0.65)
+    mouth_core = cv2.GaussianBlur(dark_or_color, (3, 3), 0)
+    alpha = np.maximum(rembg_alpha * mouth_core, edge_mask * edge_support * 0.85)
+    alpha = np.maximum(alpha, mouth_core * 0.58)
     alpha *= ellipse
 
+    if use_rembg and _REMBG_AVAILABLE:
+        rembg_gate = np.clip(rembg_alpha * 1.35 + mouth_core * 0.35, 0.0, 1.0)
+        alpha *= rembg_gate
+
+    skin_like = (
+        (gray > 0.45) &
+        (sat < 0.46) &
+        (r > b + 2) &
+        (r > g - 18)
+    ).astype(np.float32)
+    skin_penalty = skin_like * np.clip((0.62 - mouth_core) / 0.62, 0.0, 1.0)
+    alpha *= (1.0 - skin_penalty * 0.88)
+    alpha = _center_component_filter(alpha, ellipse)
+
     alpha[alpha < 0.22] = 0.0
+    close_k = max(3, (min(h, w) // 18) | 1)
+    if close_k > 3:
+        alpha = cv2.morphologyEx(
+            alpha,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_k, close_k)),
+        )
     alpha = cv2.GaussianBlur(alpha, (3, 3), 0)
     alpha[alpha < 0.18] = 0.0
     alpha = np.clip(alpha, 0.0, 1.0)
@@ -196,7 +294,8 @@ def _detect_mouth(face_np: np.ndarray,
                   mouth_type: int = 0,
                   mouth_padding_per_type: Dict[int, int] = None,
                   mouth_brightness_per_type: Dict[int, float] = None,
-                  use_rembg: bool = False) -> Optional[Tuple[np.ndarray, int, int, int, int]]:
+                  use_rembg: bool = False,
+                  rembg_session=None) -> Optional[Tuple[np.ndarray, int, int, int, int]]:
     """
     Detecta a boca na face gerada, faz rembg e devolve
     (rgba, abs_x, abs_y, abs_w, abs_h) ou None.
@@ -274,41 +373,72 @@ def _detect_mouth(face_np: np.ndarray,
         gray = cv2.cvtColor(mouth_crop, cv2.COLOR_RGB2GRAY)
         hsv = cv2.cvtColor(mouth_crop, cv2.COLOR_RGB2HSV)
         sat = hsv[:, :, 1].astype(np.float32) / 255.0
+        hue = hsv[:, :, 0].astype(np.float32) / 179.0
         gray_eq = cv2.equalizeHist(gray)
 
-        lo = max(20, int(cw * 0.5))
-        hi = max(60, int(cw * 1.5))
+        lo = max(12, int(cw * 0.28))
+        hi = max(38, int(cw * 0.95))
         edges = cv2.Canny(gray_eq, lo, hi)
-        dil_r = max(1, min(ch, cw) // 12)
-        dil_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dil_r * 2 + 1, dil_r * 2 + 1))
+        dil_x = max(1, cw // 28)
+        dil_y = max(1, ch // 18)
+        dil_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dil_x * 2 + 1, dil_y * 2 + 1))
         edge_mask = cv2.dilate(edges, dil_k, iterations=1).astype(np.float32) / 255.0
         edge_mask = cv2.GaussianBlur(edge_mask, (3, 3), 0)
 
         gray_f = gray.astype(np.float32) / 255.0
-        dark_line = np.clip((0.58 - gray_f) / 0.28, 0.0, 1.0)
-        color_line = np.clip((sat - 0.24) / 0.36, 0.0, 1.0)
-        line_mask = np.maximum(edge_mask * 0.95, np.maximum(dark_line, color_line) * 0.70)
+        dark_line = np.clip((0.66 - gray_f) / 0.34, 0.0, 1.0)
+        pink_hue = (((hue < 0.08) | (hue > 0.86)) & (sat > 0.14)).astype(np.float32)
+        color_line = np.maximum(
+            np.clip((sat - 0.16) / 0.34, 0.0, 1.0),
+            pink_hue * 0.95,
+        )
+        line_mask = np.maximum(edge_mask * 1.05, np.maximum(dark_line, color_line) * 0.88)
 
         support = np.zeros((ch, cw), dtype=np.uint8)
         cx_e, cy_e = cw // 2, ch // 2
-        axes = (max(1, int(cw * 0.48)), max(1, int(ch * 0.30)))
+        axes = (max(1, int(cw * 0.50)), max(1, int(ch * 0.34)))
         cv2.ellipse(support, (cx_e, cy_e), axes, 0, 0, 360, 255, -1)
         support_k = max(3, (min(ch, cw) // 14) | 1)
         support_f = cv2.GaussianBlur(support, (support_k, support_k), 0).astype(np.float32) / 255.0
 
-        mask_f = line_mask * support_f
-        mask_f[mask_f < 0.18] = 0.0
+        band = np.zeros((ch, cw), dtype=np.uint8)
+        band_h = max(2, int(round(ch * 0.20)))
+        cv2.ellipse(
+            band, (cx_e, cy_e),
+            (max(1, int(cw * 0.48)), max(1, band_h)),
+            0, 0, 360, 255, -1,
+        )
+        band_f = cv2.GaussianBlur(band, (support_k, support_k), 0).astype(np.float32) / 255.0
+
+        line_strength = cv2.GaussianBlur(line_mask * support_f, (3, 3), 0)
+        mask_f = np.maximum(line_strength, edge_mask * band_f * 0.42)
+        mask_f[mask_f < 0.055] = 0.0
+        thicken_k = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (max(3, (cw // 28) | 1), max(3, (ch // 20) | 1)),
+        )
+        mask_f = cv2.dilate((mask_f * 255).astype(np.uint8), thicken_k, iterations=1).astype(np.float32) / 255.0
         mask_f = cv2.GaussianBlur(mask_f, (3, 3), 0)
-        mask_f[mask_f < 0.12] = 0.0
-        mask_f = np.clip(mask_f, 0.0, 1.0)
+        mask_f[mask_f < 0.05] = 0.0
+        mask_f = np.clip(mask_f * 1.48, 0.0, 1.0)
 
         alpha8 = (mask_f * 255).clip(0, 255).astype(np.uint8)
-        mouth_rgba = np.dstack([mouth_crop, alpha8])
+        rgb_f = mouth_crop.astype(np.float32)
+        blur_rgb = cv2.GaussianBlur(rgb_f, (0, 0), 1.1)
+        contrast_rgb = np.clip(blur_rgb + (rgb_f - blur_rgb) * 1.55, 0, 255)
+        line_strength = np.clip(line_strength * 1.6, 0.0, 1.0)[:, :, None]
+        mouth_rgb = np.clip(
+            contrast_rgb * (1.0 - 0.52 * line_strength),
+            0, 255,
+        ).astype(np.uint8)
+        mouth_rgba = np.dstack([mouth_rgb, alpha8])
     else:
         # ── half_open / fully_open: combina YOLO + rembg + máscara de cor ───
         # O rembg sozinho às vezes preserva pele ao redor dos lábios; a máscara
         # abaixo restringe o alpha a regiões escuras/coloridas típicas da boca.
-        mouth_rgba = _open_mouth_rgba(mouth_crop, mouth_type, use_rembg=use_rembg)
+        mouth_rgba = _open_mouth_rgba(
+            mouth_crop, mouth_type, use_rembg=use_rembg,
+            rembg_session=rembg_session)
 
     del mouth_crop
 
@@ -482,11 +612,13 @@ def process_single(q: int,
                    conf_mouth: float,
                    mouth_padding_per_type: Dict[int, int] = None,
                    mouth_brightness_per_type: Dict[int, float] = None,
-                   use_rembg: bool = False) -> None:
+                   use_rembg: bool = False,
+                   rembg_session=None) -> None:
     mt        = mouth_types[q]
     meta      = store.load_face_frame_meta(q)
     fg        = int(meta.get("face_group", 0))
     epoch     = int(meta.get("mouth_cache_epoch", fg))
+    use_cache = bool(meta.get("use_mouth_cache", True))
 
     if not store.has_face_frame(q):
         store.save_mouth_frame(q, np.zeros((4, 4, 4), dtype=np.uint8), 0, 0, 0, 0)
@@ -515,8 +647,8 @@ def process_single(q: int,
     """
 
     cache_key = (epoch, mt, fg)
-    cached = bbox_cache.get(cache_key)
-    if cached is None and store.has_mouth_cache(mt, fg, epoch=epoch):
+    cached = bbox_cache.get(cache_key) if use_cache else None
+    if use_cache and cached is None and store.has_mouth_cache(mt, fg, epoch=epoch):
         try:
             cached_rgba, cached_meta = store.load_mouth_cache(mt, fg)
             cached = {"rgba": cached_rgba, "pos": cached_meta}
@@ -542,7 +674,8 @@ def process_single(q: int,
                            mouth_type=mt,
                            mouth_padding_per_type=mouth_padding_per_type,
                            mouth_brightness_per_type=mouth_brightness_per_type,
-                           use_rembg=use_rembg)
+                           use_rembg=use_rembg,
+                           rembg_session=rembg_session)
 
     if result is None:
         store.save_mouth_frame(q, np.zeros((4, 4, 4), dtype=np.uint8), 0, 0, 0, 0)
@@ -572,8 +705,9 @@ def process_single(q: int,
                 "generated_face_h": cache_ref_shape[0],
             })
         cached = {"rgba": rgba, "pos": pos}
-        bbox_cache[cache_key] = cached
-        if not store.has_mouth_cache(mt, fg, epoch=epoch):
+        if use_cache:
+            bbox_cache[cache_key] = cached
+        if use_cache and not store.has_mouth_cache(mt, fg, epoch=epoch):
             store.save_mouth_cache(
                 mt, fg, rgba, pos,
                 epoch=epoch,
@@ -603,13 +737,15 @@ def _worker_batch(worker_id: int,
     model = None
     try:
         model = YOLO(detection_model_path)
+        rembg_session = _make_rembg_session() if use_rembg and _REMBG_AVAILABLE else None
         local: Dict = {}
         for q in indices:
             try:
                 process_single(q, store, mouth_types, model, local,
                                upscale_crop_face, conf_mouth,
                                mouth_padding_per_type, mouth_brightness_per_type,
-                               use_rembg=use_rembg)
+                               use_rembg=use_rembg,
+                               rembg_session=rembg_session)
             except Exception as exc:
                 print(f"[F2-W{worker_id}] Erro frame {q}: {exc}")
                 try:

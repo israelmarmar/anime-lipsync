@@ -236,13 +236,15 @@ class DiskStore:
         return jload(self._frame_face_json(idx)) or {}
 
     def save_face_frame(self, idx, arr, mouth_type, face_group, prompt, source,
-                        crop_w=0, crop_h=0, mouth_cache_epoch=0):
+                        crop_w=0, crop_h=0, mouth_cache_epoch=0,
+                        use_mouth_cache=True):
         self._save_webp_rgb(self._frame_face_img(idx), arr)
         atomic_write(self._frame_face_json(idx), jdumps({
             "mouth_type": mouth_type, "mouth_type_name": MOUTH_TYPE_NAMES[mouth_type],
             "face_group": face_group, "prompt": prompt, "source": source,
             "w": arr.shape[1], "h": arr.shape[0], "crop_w": crop_w, "crop_h": crop_h,
             "mouth_cache_epoch": mouth_cache_epoch,
+            "use_mouth_cache": bool(use_mouth_cache),
         }))
 
     def copy_face_to_frame(self, src_img, idx, mouth_type, face_group, prompt,

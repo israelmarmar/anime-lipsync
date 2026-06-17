@@ -38,6 +38,7 @@ from .character_detect import build_character_bboxes
 from .phase1 import run_phase1
 from .phase2 import run_phase2, smooth_mouth_tracks
 from .phase3 import run_phase3, launch_overlap_workers, ensure_all_outputs
+from .ltx_pipeline import run_ltx_lipsync, save_ltx_face_frames
 
 
 class LipSyncZTurboPipeline:
@@ -427,13 +428,239 @@ class LipSyncZTurboPipeline:
         return {"ui": {"videos": []}, "result": ("", video_info)}
 
 
+class LipSyncLTXPipeline:
+    """Versão LTX: LTX anima a face/lip sync; Z-Image Turbo refina só o primeiro frame."""
+
+    CATEGORY     = "LipSync"
+    FUNCTION     = "run"
+    OUTPUT_NODE  = True
+    RETURN_TYPES = ("STRING", "VHS_VIDEOINFO")
+    RETURN_NAMES = ("video_path", "video_info")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        node_dir = os.path.dirname(os.path.abspath(__file__))
+        external_detection_model = "/disco3/anime_mouth_yolo/best.pt"
+        detection_model_default = (
+            external_detection_model
+            if os.path.exists(external_detection_model)
+            else os.path.join(node_dir, "best.pt")
+        )
+        return {
+            "required": {
+                "audio": ("AUDIO",),
+                "images": ("IMAGE",),
+                "detection_model_path": ("STRING", {
+                    "default": detection_model_default,
+                    "multiline": False,
+                    "tooltip": "Modelo YOLO unico: classe 0 = face, classe 1 = boca.",
+                }),
+            },
+            "optional": {
+                "fps": ("INT", {"default": 24, "min": 1, "max": 60}),
+                "source_fps": ("FLOAT", {"default": 12.0, "min": 0.1, "max": 120.0}),
+                "mask_dilation": ("INT", {"default": 8, "min": 0, "max": 64}),
+                "mask_blur": ("INT", {"default": 5, "min": 0, "max": 31}),
+                "mouth_conf": ("FLOAT", {"default": 0.1, "min": 0.01, "max": 1.0, "step": 0.01}),
+                "upscale_crop_face": ("FLOAT", {"default": 2.0, "min": 1.0, "max": 10.0, "step": 0.5}),
+                "remove_mouth": ("BOOLEAN", {"default": True}),
+                "use_rembg": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Aplica rembg apenas nos crops de boca recortados da face LTX para remover pele residual.",
+                }),
+                "vram_safety_margin_mb": ("INT", {"default": 1024, "min": 256, "max": 16384, "step": 256}),
+                "ltx_cpu_workers": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 32,
+                    "tooltip": "0 = auto. Paraleliza preparo/salvamento de crops; a extração YOLO segue os workers por VRAM.",
+                }),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 2**63 - 1}),
+                "prompt": ("STRING", {
+                    "default": (
+                        "Anime screencap. A character speaks with clear lip sync, "
+                        "natural face animation, low frame rate, 24 FPS"
+                    ),
+                    "multiline": True,
+                }),
+                "negative_prompt": ("STRING", {
+                    "default": (
+                        "smallpox, blurry, low quality, still frame, watermark, overlay, "
+                        "titles, subtitles, deformed face, deformed mouth, teeth artifacts"
+                    ),
+                    "multiline": True,
+                }),
+                "z_prompt": ("STRING", {
+                    "default": "a clean traditional-style anime character face, natural mouth area",
+                    "multiline": True,
+                }),
+                "ltx_steps": ("INT", {"default": 8, "min": 1, "max": 40}),
+                "ltx_cfg": ("FLOAT", {"default": 1.2, "min": 0.0, "max": 10.0, "step": 0.1}),
+                "ltx_iclora_strength": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 2.0, "step": 0.05}),
+                "ltx_image_strength": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "ltx_canny_strength": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "z_steps": ("INT", {"default": 9, "min": 1, "max": 30}),
+                "z_cfg": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.1}),
+                "z_denoise": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "z_controlnet_strength": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 2.0, "step": 0.05}),
+                "video_output_filename": ("STRING", {"default": "lipsync_ltx_output", "multiline": False}),
+                "ltx_clip_name1": ("STRING", {"default": "gemma_3_12B_it_fp4_mixed.safetensors", "multiline": False}),
+                "ltx_clip_name2": ("STRING", {"default": "ltx-2.3_text_projection_bf16.safetensors", "multiline": False}),
+                "ltx_unet_name": ("STRING", {"default": "ltx-2.3-22b-distilled-fp8.safetensors", "multiline": False}),
+                "ltx_video_vae_name": ("STRING", {"default": "LTX23_video_vae_bf16.safetensors", "multiline": False}),
+                "ltx_audio_vae_name": ("STRING", {"default": "LTX23_audio_vae_bf16.safetensors", "multiline": False}),
+                "ltx_iclora_name": ("STRING", {"default": "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors", "multiline": False}),
+                "z_unet_name": ("STRING", {"default": "z_image_turbo_bf16.safetensors", "multiline": False}),
+                "z_clip_name": ("STRING", {"default": "qwen_3_4b.safetensors", "multiline": False}),
+                "z_vae_name": ("STRING", {"default": "ae.safetensors", "multiline": False}),
+                "z_patch_name": ("STRING", {"default": "Z-Image-Turbo-Fun-Controlnet-Union-2.1.safetensors", "multiline": False}),
+            },
+        }
+
+    def run(
+        self,
+        audio,
+        images,
+        detection_model_path: str,
+        fps: int = 24,
+        source_fps: float = 12.0,
+        mask_dilation: int = 8,
+        mask_blur: int = 5,
+        mouth_conf: float = 0.1,
+        upscale_crop_face: float = 2.0,
+        remove_mouth: bool = True,
+        use_rembg: bool = True,
+        vram_safety_margin_mb: int = 1024,
+        ltx_cpu_workers: int = 0,
+        seed: int = 0,
+        prompt: str = "",
+        negative_prompt: str = "",
+        z_prompt: str = "",
+        ltx_steps: int = 8,
+        ltx_cfg: float = 1.2,
+        ltx_iclora_strength: float = 0.9,
+        ltx_image_strength: float = 0.7,
+        ltx_canny_strength: float = 0.5,
+        z_steps: int = 9,
+        z_cfg: float = 1.0,
+        z_denoise: float = 0.9,
+        z_controlnet_strength: float = 0.7,
+        video_output_filename: str = "lipsync_ltx_output",
+        ltx_clip_name1: str = "gemma_3_12B_it_fp4_mixed.safetensors",
+        ltx_clip_name2: str = "ltx-2.3_text_projection_bf16.safetensors",
+        ltx_unet_name: str = "ltx-2.3-22b-distilled-fp8.safetensors",
+        ltx_video_vae_name: str = "LTX23_video_vae_bf16.safetensors",
+        ltx_audio_vae_name: str = "LTX23_audio_vae_bf16.safetensors",
+        ltx_iclora_name: str = "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors",
+        z_unet_name: str = "z_image_turbo_bf16.safetensors",
+        z_clip_name: str = "qwen_3_4b.safetensors",
+        z_vae_name: str = "ae.safetensors",
+        z_patch_name: str = "Z-Image-Turbo-Fun-Controlnet-Union-2.1.safetensors",
+    ) -> dict:
+        t_start = time.perf_counter()
+        output_dir = get_comfy_output_dir()
+        stem = Path(video_output_filename).stem or "lipsync_ltx_output"
+        final_path, filename = unique_filename(output_dir, stem, ".mp4")
+
+        with tempfile.TemporaryDirectory(prefix="lipsync_ltx_") as work_dir:
+            store = DiskStore(Path(work_dir))
+            audio_orig_wav = save_audio_original(audio, work_dir)
+
+            n_frames = max(1, int(round(audio["waveform"].shape[-1] / float(audio["sample_rate"]) * fps)))
+            mouth_types_list = [2] * n_frames
+            src_total = images.shape[0]
+            print(f"[LipSync LTX] {n_frames} frames @ {fps}fps | Output → {final_path}")
+
+            for i in range(n_frames):
+                src_idx = min(int(i / fps * source_fps), src_total - 1)
+                frame_np = t2np(images[src_idx])
+                store.save_orig(i, frame_np)
+                del frame_np
+            del images
+            cuda_cleanup()
+
+            n_workers = compute_workers(vram_safety_margin_mb)
+            run_phase0(
+                store, n_frames,
+                detection_model_path,
+                vram_safety_margin_mb,
+                mask_dilation, mask_blur,
+                remove_mouth, upscale_crop_face,
+                mouth_conf, n_workers,
+                character_bboxes=None,
+            )
+
+            with torch.inference_mode():
+                out_images = run_ltx_lipsync(
+                    store, n_frames, fps, audio,
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    z_prompt=z_prompt,
+                    seed=seed,
+                    ltx_steps=ltx_steps,
+                    ltx_cfg=ltx_cfg,
+                    ltx_iclora_strength=ltx_iclora_strength,
+                    ltx_image_strength=ltx_image_strength,
+                    ltx_canny_strength=ltx_canny_strength,
+                    z_steps=z_steps,
+                    z_cfg=z_cfg,
+                    z_denoise=z_denoise,
+                    z_controlnet_strength=z_controlnet_strength,
+                    ltx_clip_name1=ltx_clip_name1,
+                    ltx_clip_name2=ltx_clip_name2,
+                    ltx_unet_name=ltx_unet_name,
+                    ltx_video_vae_name=ltx_video_vae_name,
+                    ltx_audio_vae_name=ltx_audio_vae_name,
+                    ltx_iclora_name=ltx_iclora_name,
+                    z_unet_name=z_unet_name,
+                    z_clip_name=z_clip_name,
+                    z_vae_name=z_vae_name,
+                    z_patch_name=z_patch_name,
+                    cpu_workers=ltx_cpu_workers,
+                )
+
+            save_workers = ltx_cpu_workers
+            if save_workers <= 0:
+                save_workers = max(1, min(8, n_workers * 2))
+            generated = save_ltx_face_frames(
+                store, out_images, mouth_types_list, n_frames=n_frames,
+                n_workers=save_workers)
+            if generated < n_frames:
+                print(f"[LipSync LTX] LTX retornou {generated}/{n_frames} frames; mux usando os frames gerados.")
+
+            n_workers_f2 = compute_workers(vram_safety_margin_mb)
+            run_phase2(
+                store, mouth_types_list[:generated], generated,
+                detection_model_path, n_workers_f2,
+                upscale_crop_face, mouth_conf,
+                use_rembg=use_rembg,
+            )
+            n_workers_f3 = compute_workers(vram_safety_margin_mb)
+            run_phase3(store, generated, 0, n_workers_f3)
+
+            build_video_with_audio(store.output_dir, audio_orig_wav, generated, fps, final_path)
+
+        elapsed = time.perf_counter() - t_start
+        print(f"\n[LipSync LTX Done] {elapsed:.1f}s")
+        video_info = {"video_path": final_path, "fps": fps, "n_frames": generated}
+        return {
+            "ui": {
+                "videos": [{"filename": filename, "subfolder": "", "type": "output"}],
+                "animated": [False],
+            },
+            "result": (final_path, video_info),
+        }
+
+
 # ===========================================================================
 # Registro ComfyUI
 # ===========================================================================
 
 NODE_CLASS_MAPPINGS = {
     "LipSyncPipelineV6": LipSyncZTurboPipeline,
+    "LipSyncLTXPipelineV1": LipSyncLTXPipeline,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "LipSyncPipelineV6": "LipSync Pipeline V6",
+    "LipSyncLTXPipelineV1": "LipSync LTX Pipeline V1",
 }
