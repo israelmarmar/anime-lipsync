@@ -16,6 +16,7 @@ Módulos:
 """
 
 import os
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -46,8 +47,8 @@ class LipSyncZTurboPipeline:
     CATEGORY     = "LipSync"
     FUNCTION     = "run"
     OUTPUT_NODE  = True
-    RETURN_TYPES = ("STRING", "VHS_VIDEOINFO")
-    RETURN_NAMES = ("video_path", "video_info")
+    RETURN_TYPES = ("STRING", "VHS_VIDEOINFO", "STRING")
+    RETURN_NAMES = ("video_path", "video_info", "debug_dir")
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -87,10 +88,13 @@ class LipSyncZTurboPipeline:
                 "vram_safety_margin_mb": ("INT",     {"default": 1024, "min": 256,  "max": 16384, "step": 256}),
                 "compose_feather_px":    ("INT",     {"default": 2,    "min": 0,    "max": 32}),
                 "enable_overlap":        ("BOOLEAN", {"default": True}),
-                "use_rembg":             ("BOOLEAN", {"default": False, "tooltip": "Ativa rembg no recorte de bocas abertas. Mais preciso em alguns casos, porém mais lento."}),
+                "use_rembg":             ("BOOLEAN", {"default": True, "tooltip": "Ativa BEN2 no recorte da boca para remover pele residual. Mais preciso, porém mais lento."}),
                 "upscale_crop_face":     ("FLOAT",   {"default": 2.0,  "min": 1.0,  "max": 10.0,  "step": 0.5}),
                 "mouth_conf":            ("FLOAT",   {"default": 0.1,  "min": 0.01, "max": 1.0,   "step": 0.01}),
                 "remove_mouth":          ("BOOLEAN", {"default": True}),
+                "save_debug_folder":     ("BOOLEAN", {"default": False, "tooltip": "Copia a pasta temporária de trabalho para o output do ComfyUI e retorna o caminho em debug_dir."}),
+                "verify_generated_mouth": ("BOOLEAN", {"default": True, "tooltip": "Valida com YOLO se a face gerada contém boca antes de cachear/sobrepor."}),
+                "mouth_regen_attempts":  ("INT",     {"default": 2,    "min": 0,    "max": 8, "tooltip": "Quantas novas amostras KSampler tentar quando a boca gerada não for detectada."}),
                 "hed_detector_mode":      (["auto", "controlnet_aux", "comfy_hed"], {
                     "default": "auto",
                     "tooltip": (
@@ -188,10 +192,13 @@ class LipSyncZTurboPipeline:
         vram_safety_margin_mb: int = 1024,
         compose_feather_px: int = 2,
         enable_overlap: bool = True,
-        use_rembg: bool = False,
+        use_rembg: bool = True,
         upscale_crop_face: float = 2.0,
         mouth_conf: float = 0.1,
         remove_mouth: bool = True,
+        save_debug_folder: bool = False,
+        verify_generated_mouth: bool = True,
+        mouth_regen_attempts: int = 2,
         hed_detector_mode: str = "auto",
         # Padding por tipo
         mouth_padding_closed: int = 0,
@@ -273,6 +280,7 @@ class LipSyncZTurboPipeline:
         output_dir           = get_comfy_output_dir()
         stem                 = Path(video_output_filename).stem or "lipsync_output"
         final_path, filename = unique_filename(output_dir, stem, ".mp4")
+        debug_dir = ""
 
         print(f"[LipSync V5.5] Output → {final_path}")
         for mt, lcfg in lora_cfg.items():
@@ -358,6 +366,10 @@ class LipSyncZTurboPipeline:
                         lora_cfg=lora_cfg,
                         hed_detector_mode=hed_detector_mode,
                         motion_variance_factor=motion_variance_factor,
+                        detection_model_path=detection_model_path,
+                        conf_mouth=mouth_conf,
+                        verify_generated_mouth=verify_generated_mouth,
+                        mouth_regen_attempts=mouth_regen_attempts,
                     )
 
                 timeout_s = n_frames * 5 + 120
@@ -386,6 +398,10 @@ class LipSyncZTurboPipeline:
                         lora_cfg=lora_cfg,
                         hed_detector_mode=hed_detector_mode,
                         motion_variance_factor=motion_variance_factor,
+                        detection_model_path=detection_model_path,
+                        conf_mouth=mouth_conf,
+                        verify_generated_mouth=verify_generated_mouth,
+                        mouth_regen_attempts=mouth_regen_attempts,
                     )
 
                 n_workers_f2 = compute_workers(vram_safety_margin_mb)
@@ -411,10 +427,26 @@ class LipSyncZTurboPipeline:
                 print(f"[Video] ERRO: {exc}")
                 filename = ""; final_path = ""
 
+            if save_debug_folder:
+                debug_base = Path(output_dir) / f"{stem}_debug"
+                debug_path = debug_base
+                counter = 1
+                while debug_path.exists():
+                    debug_path = Path(output_dir) / f"{stem}_debug_{counter:04d}"
+                    counter += 1
+                shutil.copytree(store.work_dir, debug_path)
+                debug_dir = str(debug_path)
+                print(f"[Debug] Pasta salva: {debug_dir}")
+
         elapsed = time.perf_counter() - t_start
         print(f"\n[Done] {elapsed:.1f}s | {elapsed / n_frames:.2f}s/frame")
 
-        video_info = {"video_path": final_path, "fps": fps, "n_frames": n_frames}
+        video_info = {
+            "video_path": final_path,
+            "fps": fps,
+            "n_frames": n_frames,
+            "debug_dir": debug_dir,
+        }
 
         if video_ok and filename:
             return {
@@ -422,9 +454,9 @@ class LipSyncZTurboPipeline:
                     "videos": [{"filename": filename, "subfolder": "", "type": "output"}],
                     "animated": [False],
                 },
-                "result": (final_path, video_info),
+                "result": (final_path, video_info, debug_dir),
             }
-        return {"ui": {"videos": []}, "result": ("", video_info)}
+        return {"ui": {"videos": []}, "result": ("", video_info, debug_dir)}
 
 
 # ===========================================================================

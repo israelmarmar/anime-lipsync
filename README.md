@@ -13,6 +13,7 @@ Ele retorna:
 
 - `video_path`: caminho do MP4 final.
 - `video_info`: metadados do vídeo para integrações como VHS.
+- `debug_dir`: caminho da pasta de debug persistida quando `save_debug_folder=True`.
 
 ## Visão Geral
 
@@ -114,6 +115,9 @@ Ele usa:
 - `sim_threshold`: threshold para separar grupos de face. Agora usa comparação por scribble.
 - `vram_safety_margin_mb`: margem de VRAM antes de lançar workers.
 - `enable_overlap`: processa F2/F3 em paralelo com a F1 quando possível.
+- `save_debug_folder`: copia a pasta temporária de trabalho para o output do ComfyUI e retorna o caminho em `debug_dir`.
+- `verify_generated_mouth`: valida com YOLO se a face gerada contém boca entre nariz e queixo; para `neutral_closed`, também exige apenas contorno fino de lábio, sem cavidade interna preenchida.
+- `mouth_regen_attempts`: número de rerenders KSampler quando a boca não é detectada na face gerada.
 - `video_output_filename`: nome base do MP4 final.
 
 ### Detecção e Máscara

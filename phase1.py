@@ -18,6 +18,7 @@ from .utils import (
     t2np, np2t, get_node_output, free_vram, cuda_cleanup,
     vram_free_mb, vram_info,
 )
+from .phase0 import _dynamic_upscale, _run_yolo, YOLO_MOUTH_CLASS_ID
 
 try:
     from skimage.metrics import structural_similarity as ssim
@@ -27,6 +28,309 @@ except ImportError:
 _HED_AUX_DETECTOR = None
 _HED_AUX_UNAVAILABLE_REASON = None
 _HED_GROUP_WARNED = False
+YOLO_NOSE_CLASS_ID = 2
+YOLO_CHIN_CLASS_ID = 3
+
+
+def _best_class_box(xyxy, confs, classes, class_id: int):
+    if xyxy is None or confs is None or classes is None:
+        return None
+    idxs = np.where(classes == class_id)[0]
+    if len(idxs) == 0:
+        return None
+    idx = idxs[int(np.argmax(confs[idxs]))]
+    return xyxy[idx].astype(int), float(confs[idx])
+
+
+def _select_anatomical_mouth(xyxy, confs, classes,
+                             image_shape: Tuple[int, int]):
+    if xyxy is None or confs is None or classes is None:
+        return None, "sem detecções"
+
+    image_h, image_w = image_shape
+    face_det = _best_class_box(xyxy, confs, classes, 0)
+    nose_det = _best_class_box(xyxy, confs, classes, YOLO_NOSE_CLASS_ID)
+    chin_det = _best_class_box(xyxy, confs, classes, YOLO_CHIN_CLASS_ID)
+    if face_det is not None:
+        fx1, fy1, fx2, fy2 = [float(v) for v in face_det[0]]
+    else:
+        fx1, fy1, fx2, fy2 = 0.0, 0.0, float(image_w), float(image_h)
+    face_w = max(1.0, fx2 - fx1)
+    face_h = max(1.0, fy2 - fy1)
+
+    if nose_det is None and chin_det is None:
+        return None, "nariz e queixo não detectados"
+
+    nose_box = nose_det[0] if nose_det is not None else None
+    chin_box = chin_det[0] if chin_det is not None else None
+    nose_cx = ((nose_box[0] + nose_box[2]) * 0.5) if nose_box is not None else None
+    chin_cx = ((chin_box[0] + chin_box[2]) * 0.5) if chin_box is not None else None
+
+    if nose_box is not None:
+        region_top = float(nose_box[3]) - face_h * 0.03
+    else:
+        region_top = fy1 + face_h * 0.52
+    if chin_box is not None:
+        region_bottom = float(chin_box[1]) + face_h * 0.05
+    else:
+        region_bottom = fy1 + face_h * 0.90
+
+    anchor_xs = [v for v in (nose_cx, chin_cx) if v is not None]
+    anchor_x = sum(anchor_xs) / len(anchor_xs)
+    max_x_delta = face_w * 0.28
+
+    mouth_idxs = np.where(classes == YOLO_MOUTH_CLASS_ID)[0]
+    valid = []
+    rejected = []
+    for idx in mouth_idxs:
+        x1, y1, x2, y2 = [float(v) for v in xyxy[idx]]
+        cx = (x1 + x2) * 0.5
+        cy = (y1 + y2) * 0.5
+        inside_face = fx1 <= cx <= fx2 and fy1 <= cy <= fy2
+        vertical_ok = region_top <= cy <= region_bottom
+        horizontal_ok = abs(cx - anchor_x) <= max_x_delta
+        if inside_face and vertical_ok and horizontal_ok:
+            valid.append(idx)
+        else:
+            rejected.append(
+                f"conf={float(confs[idx]):.3f} center=({cx:.0f},{cy:.0f})")
+
+    if not valid:
+        details = ", ".join(rejected[:3]) if rejected else "nenhum candidato mouth"
+        return None, (
+            f"boca fora da região nariz-queixo y={region_top:.0f}..{region_bottom:.0f} "
+            f"x={anchor_x:.0f}±{max_x_delta:.0f}; {details}"
+        )
+
+    best = valid[int(np.argmax(confs[valid]))]
+    landmarks = (
+        f"nose={'yes' if nose_det is not None else 'no'} "
+        f"chin={'yes' if chin_det is not None else 'no'}"
+    )
+    return (xyxy[best].astype(int), float(confs[best])), landmarks
+
+
+def _detect_anatomical_mouth(face_rgb: np.ndarray,
+                             detection_model,
+                             conf_mouth: float,
+                             upscale_crop_face: float):
+    h, w = face_rgb.shape[:2]
+    up_w, up_h = _dynamic_upscale(h, w, upscale_crop_face)
+    face_up = cv2.resize(face_rgb, (up_w, up_h), interpolation=cv2.INTER_LANCZOS4)
+
+    attempts = (
+        (float(conf_mouth), 768, "primary"),
+        (max(0.03, float(conf_mouth) * 0.5), 1024, "retry"),
+    )
+    last_reason = "YOLO não detectou boca anatômica"
+    for pass_conf, imgsz, pass_name in attempts:
+        xyxy, confs, classes = _run_yolo(
+            detection_model, face_up, pass_conf, imgsz=imgsz)
+        mouth_det, reason = _select_anatomical_mouth(
+            xyxy, confs, classes, (up_h, up_w))
+        del xyxy, confs, classes
+        if mouth_det is not None:
+            del face_up
+            return mouth_det, up_w, up_h, f"pass={pass_name} {reason}"
+        last_reason = f"pass={pass_name}: {reason}"
+
+    del face_up
+    return None, up_w, up_h, last_reason
+
+
+def _closed_mouth_contour_only(face_rgb: np.ndarray,
+                               mouth_bbox,
+                               detector_shape: Tuple[int, int]) -> Tuple[bool, str]:
+    image_h, image_w = face_rgb.shape[:2]
+    det_h, det_w = detector_shape
+    x1u, y1u, x2u, y2u = [int(v) for v in mouth_bbox]
+    x1 = max(0, int(round(x1u * image_w / max(1, det_w))))
+    x2 = min(image_w, int(round(x2u * image_w / max(1, det_w))))
+    y1 = max(0, int(round(y1u * image_h / max(1, det_h))))
+    y2 = min(image_h, int(round(y2u * image_h / max(1, det_h))))
+    if x2 <= x1 or y2 <= y1:
+        return False, "crop da boca fechada vazio"
+
+    crop = face_rgb[y1:y2, x1:x2]
+    if crop.shape[0] < 2 or crop.shape[1] < 4:
+        return False, "crop da boca fechada pequeno demais"
+
+    scale = max(1.0, 160.0 / max(1, crop.shape[1]))
+    work_w = max(32, int(round(crop.shape[1] * scale)))
+    work_h = max(16, int(round(crop.shape[0] * scale)))
+    work = cv2.resize(crop, (work_w, work_h), interpolation=cv2.INTER_CUBIC)
+    gray = cv2.cvtColor(work, cv2.COLOR_RGB2GRAY)
+    hsv = cv2.cvtColor(work, cv2.COLOR_RGB2HSV)
+
+    r = work[:, :, 0].astype(np.int16)
+    g = work[:, :, 1].astype(np.int16)
+    b = work[:, :, 2].astype(np.int16)
+    dark = gray < min(112, int(np.percentile(gray, 35)) + 18)
+    mouth_color = (
+        (hsv[:, :, 1] > 72)
+        & (r > g + 9)
+        & (r > b + 4)
+        & (gray < 178)
+    )
+    foreground = (dark | mouth_color).astype(np.uint8)
+    foreground = cv2.morphologyEx(
+        foreground, cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+
+    ix1, ix2 = int(work_w * 0.12), max(1, int(work_w * 0.88))
+    iy1, iy2 = int(work_h * 0.12), max(1, int(work_h * 0.88))
+    inner = foreground[iy1:iy2, ix1:ix2]
+    if inner.size == 0:
+        return False, "região interna da boca fechada vazia"
+
+    fill_ratio = float(inner.mean())
+    distance = cv2.distanceTransform(foreground, cv2.DIST_L2, 5)
+    thickness_ratio = float(distance.max() * 2.0 / max(1, work_h))
+
+    core_kernel_h = max(3, (int(round(work_h * 0.18)) | 1))
+    core_kernel_w = max(3, (int(round(work_h * 0.12)) | 1))
+    core = cv2.erode(
+        foreground,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (core_kernel_w, core_kernel_h)),
+        iterations=1,
+    )
+    core_ratio = float(core[iy1:iy2, ix1:ix2].mean())
+
+    # Uma boca fechada pode ter duas linhas de lábio, mas não uma cavidade
+    # espessa e preenchida como uma boca entreaberta.
+    if fill_ratio > 0.38 and thickness_ratio > 0.34:
+        return False, (
+            f"boca fechada com preenchimento interno fill={fill_ratio:.3f} "
+            f"thickness={thickness_ratio:.3f} core={core_ratio:.3f}"
+        )
+    if core_ratio > 0.11 or thickness_ratio > 0.48:
+        return False, (
+            f"boca fechada parece aberta fill={fill_ratio:.3f} "
+            f"thickness={thickness_ratio:.3f} core={core_ratio:.3f}"
+        )
+
+    return True, (
+        f"contour_only fill={fill_ratio:.3f} "
+        f"thickness={thickness_ratio:.3f} core={core_ratio:.3f}"
+    )
+
+
+def _generated_mouth_present(face_rgb: np.ndarray,
+                             detection_model,
+                             conf_mouth: float,
+                             upscale_crop_face: float,
+                             mouth_type: int,
+                             is_silence: bool = False) -> Tuple[bool, str]:
+    if detection_model is None:
+        return True, "sem verificador"
+    h, w = face_rgb.shape[:2]
+    if h <= 0 or w <= 0:
+        return False, "face vazia"
+
+    mouth_det, up_w, up_h, anatomy_msg = _detect_anatomical_mouth(
+        face_rgb, detection_model, conf_mouth, upscale_crop_face)
+
+    if mouth_det is None:
+        return False, anatomy_msg
+
+    (x1, y1, x2, y2), det_conf = mouth_det
+    bw = max(0, int(x2) - int(x1))
+    bh = max(0, int(y2) - int(y1))
+    rel_width = bw / max(1, up_w)
+    rel_height = bh / max(1, up_h)
+    aspect = bw / max(1, bh)
+    rel_area = (bw * bh) / max(1, up_w * up_h)
+    if mouth_type == 0:
+        max_height = 0.02
+        min_aspect = 1.60
+        if rel_height > max_height:
+            return False, (
+                f"boca fechada grossa demais height={rel_height:.4f} "
+                f"max={max_height:.4f} conf={det_conf:.3f}"
+            )
+        if aspect < min_aspect:
+            return False, (
+                f"boca fechada pouco horizontal aspect={aspect:.2f} "
+                f"min={min_aspect:.2f} conf={det_conf:.3f}"
+            )
+    if is_silence:
+        min_width = 0.055
+        if rel_width < min_width:
+            return False, (
+                f"boca de silêncio estreita demais width={rel_width:.4f} "
+                f"min={min_width:.4f} conf={det_conf:.3f}"
+            )
+
+    min_area = 0.000010 if mouth_type == 0 else 0.000035
+    if rel_area < min_area:
+        return False, f"boca pequena demais area={rel_area:.6f} conf={det_conf:.3f}"
+
+    contour_msg = ""
+    if mouth_type == 0:
+        contour_ok, contour_msg = _closed_mouth_contour_only(
+            face_rgb, (x1, y1, x2, y2), (up_h, up_w))
+        if not contour_ok:
+            return False, contour_msg
+
+    return True, (
+        f"{anatomy_msg} conf={det_conf:.3f} width={rel_width:.4f} "
+        f"height={rel_height:.4f} aspect={aspect:.2f} area={rel_area:.6f} "
+        f"{contour_msg}"
+    )
+
+
+def _enhance_closed_mouth_contrast(face_rgb: np.ndarray,
+                                   detection_model,
+                                   conf_mouth: float,
+                                   upscale_crop_face: float) -> np.ndarray:
+    if detection_model is None:
+        return face_rgb
+    h, w = face_rgb.shape[:2]
+    if h <= 0 or w <= 0:
+        return face_rgb
+
+    mouth_det, up_w, up_h, _ = _detect_anatomical_mouth(
+        face_rgb, detection_model, conf_mouth, upscale_crop_face)
+    if mouth_det is None:
+        return face_rgb
+
+    (x1u, y1u, x2u, y2u), _ = mouth_det
+    sx = w / max(1, up_w)
+    sy = h / max(1, up_h)
+    x1 = int(round(x1u * sx)); x2 = int(round(x2u * sx))
+    y1 = int(round(y1u * sy)); y2 = int(round(y2u * sy))
+    bw = max(1, x2 - x1)
+    bh = max(1, y2 - y1)
+    pad_x = max(2, int(round(bw * 0.18)))
+    pad_y = max(2, int(round(bh * 0.75)))
+    x1 = max(0, x1 - pad_x); x2 = min(w, x2 + pad_x)
+    y1 = max(0, y1 - pad_y); y2 = min(h, y2 + pad_y)
+    if x2 <= x1 or y2 <= y1:
+        return face_rgb
+
+    out = face_rgb.copy()
+    crop = out[y1:y2, x1:x2].copy()
+    lab = cv2.cvtColor(crop, cv2.COLOR_RGB2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.4, tileGridSize=(4, 4))
+    l2 = clahe.apply(l)
+    enhanced = cv2.cvtColor(cv2.merge([l2, a, b]), cv2.COLOR_LAB2RGB)
+
+    blur = cv2.GaussianBlur(enhanced, (0, 0), 1.0)
+    enhanced = cv2.addWeighted(enhanced, 1.35, blur, -0.35, 0)
+
+    gray = cv2.cvtColor(enhanced, cv2.COLOR_RGB2GRAY)
+    dark = np.clip((118.0 - gray.astype(np.float32)) / 72.0, 0.0, 1.0)
+    edges = cv2.Canny(gray, 35, 110).astype(np.float32) / 255.0
+    line_mask = np.maximum(dark, edges)
+    line_mask = cv2.GaussianBlur(line_mask, (3, 3), 0)[:, :, None]
+    enhanced = (
+        enhanced.astype(np.float32) * (1.0 - 0.18 * line_mask)
+        + crop.astype(np.float32) * (0.10 * line_mask)
+    ).clip(0, 255).astype(np.uint8)
+
+    out[y1:y2, x1:x2] = enhanced
+    return out
 
 
 def _resize_for_similarity(img, target_w: int = 256):
@@ -323,6 +627,10 @@ def run_phase1(store: DiskStore,
                lora_cfg: Optional[Dict[int, dict]] = None,
                hed_detector_mode: str = "auto",
                motion_variance_factor: float = 0.001,
+               detection_model_path: str = "",
+               conf_mouth: float = 0.1,
+               verify_generated_mouth: bool = True,
+               mouth_regen_attempts: int = 2,
                ) -> None:
     """
     lora_cfg formato:
@@ -341,6 +649,7 @@ def run_phase1(store: DiskStore,
     vaedecode            = VAEDecode()
     ksampler             = KSampler()
     cliptextencode       = CLIPTextEncode()
+    verify_model         = None
 
     # ── Condicionamentos + LoRA por tipo ─────────────────────────────────────
     print("[F1] Preparando condicionamentos e LoRAs...")
@@ -412,19 +721,19 @@ def run_phase1(store: DiskStore,
             sim = _face_similarity(last_feat, feat)
             moved, motion = _face_bbox_moved(
                 last_face_bbox, face_bbox, motion_variance_factor)
-            if sim <= sim_threshold or moved:
+            if sim <= sim_threshold:
                 removed = store.clear_mouth_cache()
             if sim <= sim_threshold:
                 face_group += 1
                 mouth_cache_epoch += 1
                 print(f"  [F1] Crop da face sem boca mudou frame {q} "
                       f"(sim={sim:.3f}) → group={face_group}; "
-                      f"caches closed/half/open limpos ({removed} arquivos)")
+                      f"caches closed/half/open limpos (arquivos)")
             elif moved:
                 mouth_cache_epoch += 1
                 print(f"  [F1] Movimento da face detectado frame {q} "
                       f"(motion={motion:.3f}, sim={sim:.3f}) → mouth_epoch={mouth_cache_epoch}; "
-                      f"caches closed/half/open limpos ({removed} arquivos)")
+                      f"caches closed/half/open limpos (arquivos)")
         last_feat = feat
         last_face_bbox = face_bbox
         frame_meta.append((q, mt, face_group, mouth_cache_epoch))
@@ -445,6 +754,14 @@ def run_phase1(store: DiskStore,
     # ── Passo 3: HED + KSampler + VAEDecode ─────────────────────────────────
     if pairs_to_gen:
         print(f"\n[F1] Passo 3/4: gerando {len(pairs_to_gen)} faces...")
+        if verify_generated_mouth:
+            try:
+                from ultralytics import YOLO
+                verify_model = YOLO(detection_model_path)
+                print(f"  [Verify] Boca gerada: YOLO ativo, tentativas extras={mouth_regen_attempts}")
+            except Exception as exc:
+                verify_model = None
+                print(f"  [Verify] Desativado: falha ao carregar YOLO ({exc})")
 
         precomputed: Dict[Tuple[int, int], dict] = {}
         for (mt, fg), q_repr in pairs_to_gen.items():
@@ -496,6 +813,7 @@ def run_phase1(store: DiskStore,
                 patched=patched, latent_in=latent_in,
                 mt=mt, fg=fg, q_repr=q_repr,
                 crop_w=crop_w, crop_h=crop_h,
+                is_silence=(phonemes[q_repr] == "_"),
             )
             del nomouth
 
@@ -546,24 +864,91 @@ def run_phase1(store: DiskStore,
                     free_vram(pc["patched"], pc["latent_in"])
                     continue
                 try:
-                    decoded = vaedecode.decode(samples=latent, vae=vae_obj)
-                    result  = t2np(get_node_output(decoded, 0))
-                    del decoded, latent
+                    result = None
+                    validation_ok = False
+                    validation_msg = "não verificado"
+                    max_attempts = max(1, int(mouth_regen_attempts) + 1)
+
+                    for attempt in range(max_attempts):
+                        if attempt == 0:
+                            cur_latent = latent
+                        else:
+                            dcfg = cfg_per_type[mt]
+                            sampled = ksampler.sample(
+                                seed=random.randint(1, 2**64),
+                                steps=int(dcfg.get("steps", 4)),
+                                cfg=float(dcfg["cfg"]),
+                                sampler_name=dcfg.get("sampler", "res_multistep"),
+                                scheduler=dcfg.get("scheduler", "simple"),
+                                denoise=float(dcfg["denoise"]),
+                                model=pc["patched"],
+                                positive=pos_conds[mt],
+                                negative=neg_cond,
+                                latent_image=pc["latent_in"],
+                            )
+                            cur_latent = get_node_output(sampled, 0)
+                            del sampled
+
+                        decoded = vaedecode.decode(samples=cur_latent, vae=vae_obj)
+                        candidate = t2np(get_node_output(decoded, 0))
+                        del decoded, cur_latent
+
+                        # Resize para crop_w×crop_h antes da validação e da Fase 2.
+                        target_w, target_h = pc["crop_w"], pc["crop_h"]
+                        if (candidate.shape[1] != target_w or candidate.shape[0] != target_h) \
+                                and target_w > 0 and target_h > 0:
+                            candidate = _cv2.resize(candidate, (target_w, target_h),
+                                                    interpolation=_cv2.INTER_LANCZOS4)
+
+                        if verify_model is not None:
+                            validation_ok, validation_msg = _generated_mouth_present(
+                                candidate, verify_model, conf_mouth, upscale_crop_face, mt,
+                                is_silence=bool(pc.get("is_silence", False)))
+                            if validation_ok and mt == 0:
+                                candidate = _enhance_closed_mouth_contrast(
+                                    candidate, verify_model, conf_mouth, upscale_crop_face)
+                                validation_msg += " contrast=closed_mouth"
+                        else:
+                            validation_ok, validation_msg = True, "verificador indisponível"
+
+                        if result is not None:
+                            del result
+                        result = candidate
+
+                        if validation_ok:
+                            if attempt > 0:
+                                print(f"  [Verify] OK após rerender {attempt} "
+                                      f"{MOUTH_TYPE_NAMES[mt]} group={fg}: {validation_msg}")
+                            break
+
+                        if attempt < max_attempts - 1:
+                            print(f"  [Verify] Sem boca {MOUTH_TYPE_NAMES[mt]} group={fg} "
+                                  f"tentativa {attempt + 1}/{max_attempts}: {validation_msg}; rerender")
+                        else:
+                            print(f"  [Verify] AVISO mantendo última face sem boca confirmada "
+                                  f"{MOUTH_TYPE_NAMES[mt]} group={fg}: {validation_msg}")
+
+                    try:
+                        del latent
+                    except Exception:
+                        pass
                     free_vram(pc["patched"], pc["latent_in"])
 
-                    # Resize para crop_w×crop_h → remap 1:1 na Fase 2
                     target_w, target_h = pc["crop_w"], pc["crop_h"]
-                    if (result.shape[1] != target_w or result.shape[0] != target_h) \
-                            and target_w > 0 and target_h > 0:
-                        result = _cv2.resize(result, (target_w, target_h),
-                                             interpolation=_cv2.INTER_LANCZOS4)
 
                     store.save_history(mt, fg, result, MOUTH_TYPE_PROMPTS[mt],
-                                       crop_w=target_w, crop_h=target_h)
+                                       crop_w=target_w, crop_h=target_h,
+                                       validation_ok=validation_ok,
+                                       validation_msg=validation_msg)
                     del result
-                    print(f"  [Saved] {MOUTH_TYPE_NAMES[mt]} group={fg}")
+                    print(f"  [Saved] {MOUTH_TYPE_NAMES[mt]} group={fg} "
+                          f"verify={'ok' if validation_ok else 'fail'} ({validation_msg})")
                 except Exception as exc:
                     print(f"  [VAEDecode] ERRO {MOUTH_TYPE_NAMES[mt]} group={fg}: {exc}")
+                    try:
+                        del latent
+                    except Exception:
+                        pass
                     free_vram(pc["patched"], pc["latent_in"])
 
             cuda_cleanup()
@@ -573,6 +958,10 @@ def run_phase1(store: DiskStore,
                 free_vram(pc.get("patched"), pc.get("latent_in"))
             except Exception:
                 pass
+        try:
+            del verify_model
+        except Exception:
+            pass
         del precomputed
 
     else:

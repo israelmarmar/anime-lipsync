@@ -200,7 +200,7 @@ def launch_overlap_workers(ready_queue: Queue,
     print(f"[Overlap] Lançando {n_workers} workers com YOLO unico "
           f"(upscale=auto(min={upscale_crop_face:.1f}x) conf={conf_mouth} "
           f"padding={mouth_padding_per_type} brightness={mouth_brightness_per_type} "
-          f"rembg={'on' if use_rembg else 'off'})...")
+          f"BEN2={'on' if use_rembg else 'off'})...")
 
     stop_event    = threading.Event()
     cache_lock    = threading.Lock()

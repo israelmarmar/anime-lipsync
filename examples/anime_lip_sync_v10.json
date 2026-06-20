@@ -1,48 +1,9 @@
 {
   "id": "d78fdd86-d27e-4c18-adae-5dedafbca8f3",
   "revision": 0,
-  "last_node_id": 27,
-  "last_link_id": 111,
+  "last_node_id": 30,
+  "last_link_id": 141,
   "nodes": [
-    {
-      "id": 10,
-      "type": "VAELoader",
-      "pos": [
-        3368.9980741108725,
-        761.1469587288315
-      ],
-      "size": [
-        270,
-        58
-      ],
-      "flags": {},
-      "order": 0,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "VAE",
-          "type": "VAE",
-          "links": [
-            108
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.3.76",
-        "Node name for S&R": "VAELoader",
-        "ue_properties": {
-          "version": "7.0.1",
-          "widget_ue_connectable": {
-            "vae_name": true
-          }
-        }
-      },
-      "widgets_values": [
-        "ae.safetensors"
-      ]
-    },
     {
       "id": 14,
       "type": "CLIPLoader",
@@ -55,7 +16,7 @@
         120.51356293985839
       ],
       "flags": {},
-      "order": 1,
+      "order": 0,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -66,7 +27,7 @@
             4,
             5,
             6,
-            107
+            133
           ]
         }
       ],
@@ -90,147 +51,6 @@
       ]
     },
     {
-      "id": 11,
-      "type": "CLIPTextEncode",
-      "pos": [
-        3285.7524238201127,
-        903.6908804595834
-      ],
-      "size": [
-        400,
-        200
-      ],
-      "flags": {},
-      "order": 7,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "clip",
-          "type": "CLIP",
-          "link": 4
-        }
-      ],
-      "outputs": [
-        {
-          "name": "CONDITIONING",
-          "type": "CONDITIONING",
-          "links": [
-            109
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.3.76",
-        "Node name for S&R": "CLIPTextEncode",
-        "ue_properties": {
-          "version": "7.0.1",
-          "widget_ue_connectable": {
-            "text": true
-          }
-        }
-      },
-      "widgets_values": [
-        "Anime screencap style, a traditional-style anime character's closed mouth, only by lines, happy"
-      ],
-      "color": "#232",
-      "bgcolor": "#353"
-    },
-    {
-      "id": 12,
-      "type": "CLIPTextEncode",
-      "pos": [
-        3291.5100579066616,
-        1201.795834853539
-      ],
-      "size": [
-        400,
-        200
-      ],
-      "flags": {},
-      "order": 8,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "clip",
-          "type": "CLIP",
-          "link": 5
-        }
-      ],
-      "outputs": [
-        {
-          "name": "CONDITIONING",
-          "type": "CONDITIONING",
-          "links": [
-            110
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.3.76",
-        "Node name for S&R": "CLIPTextEncode",
-        "ue_properties": {
-          "version": "7.0.1",
-          "widget_ue_connectable": {
-            "text": true
-          }
-        }
-      },
-      "widgets_values": [
-        "Anime screencap style, no teeth, a traditional-style anime, a traditional-style anime character's half open  mouth, pink or reddish roof of the mouth without, happy face"
-      ],
-      "color": "#232",
-      "bgcolor": "#353"
-    },
-    {
-      "id": 13,
-      "type": "CLIPTextEncode",
-      "pos": [
-        3304.133747615137,
-        1491.2751714557244
-      ],
-      "size": [
-        400,
-        200
-      ],
-      "flags": {},
-      "order": 9,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "clip",
-          "type": "CLIP",
-          "link": 6
-        }
-      ],
-      "outputs": [
-        {
-          "name": "CONDITIONING",
-          "type": "CONDITIONING",
-          "links": [
-            111
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.3.76",
-        "Node name for S&R": "CLIPTextEncode",
-        "ue_properties": {
-          "version": "7.0.1",
-          "widget_ue_connectable": {
-            "text": true
-          }
-        }
-      },
-      "widgets_values": [
-        "Anime screencap style, no teeth, a traditional-style anime character's a little open mouth, pink or reddish roof of the mouth happy face"
-      ],
-      "color": "#232",
-      "bgcolor": "#353"
-    },
-    {
       "id": 16,
       "type": "PrimitiveString",
       "pos": [
@@ -242,7 +62,7 @@
         58
       ],
       "flags": {},
-      "order": 2,
+      "order": 1,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -279,7 +99,7 @@
         63.70175686923005
       ],
       "flags": {},
-      "order": 3,
+      "order": 2,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -287,7 +107,7 @@
           "name": "MODEL_PATCH",
           "type": "MODEL_PATCH",
           "links": [
-            106
+            132
           ]
         }
       ],
@@ -318,7 +138,7 @@
         136
       ],
       "flags": {},
-      "order": 4,
+      "order": 3,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -327,7 +147,7 @@
           "type": "AUDIO",
           "links": [
             18,
-            103
+            129
           ]
         }
       ],
@@ -362,7 +182,7 @@
         286
       ],
       "flags": {},
-      "order": 11,
+      "order": 13,
       "mode": 0,
       "inputs": [
         {
@@ -383,7 +203,7 @@
           "widget": {
             "name": "video"
           },
-          "link": 101
+          "link": 128
         }
       ],
       "outputs": [
@@ -455,6 +275,84 @@
       }
     },
     {
+      "id": 8,
+      "type": "UNETLoader",
+      "pos": [
+        3155.511698701804,
+        333.80451691507477
+      ],
+      "size": [
+        344.56146211382975,
+        112.78948709384235
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            131
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.17.0",
+        "Node name for S&R": "UNETLoader",
+        "ue_properties": {
+          "version": "7.0.1",
+          "widget_ue_connectable": {
+            "unet_name": true,
+            "weight_dtype": true
+          }
+        }
+      },
+      "widgets_values": [
+        "z_image_turbo_bf16.safetensors",
+        "default"
+      ]
+    },
+    {
+      "id": 19,
+      "type": "LayerUtility: PurgeVRAM",
+      "pos": [
+        4619.826340950957,
+        280.4997422444343
+      ],
+      "size": [
+        210,
+        82
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "anything",
+          "type": "*",
+          "link": 127
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "comfyui_layerstyle",
+        "ver": "1.0.90",
+        "Node name for S&R": "LayerUtility: PurgeVRAM",
+        "ue_properties": {
+          "version": "7.0.1",
+          "widget_ue_connectable": {}
+        }
+      },
+      "widgets_values": [
+        true,
+        true
+      ],
+      "color": "rgba(38, 73, 116, 0.7)"
+    },
+    {
       "id": 6,
       "type": "VHS_VideoCombine",
       "pos": [
@@ -466,7 +364,7 @@
         1342.0951536293355
       ],
       "flags": {},
-      "order": 13,
+      "order": 14,
       "mode": 0,
       "inputs": [
         {
@@ -524,167 +422,107 @@
           "hidden": false,
           "paused": false,
           "params": {
-            "filename": "AnimateDiff_00089-audio.mp4",
+            "filename": "AnimateDiff_00279-audio.mp4",
             "subfolder": "",
             "type": "output",
             "format": "video/h264-mp4",
             "frame_rate": 12,
-            "workflow": "AnimateDiff_00089.png",
-            "fullpath": "/disco3/ComfyUI/output/AnimateDiff_00089-audio.mp4"
+            "workflow": "AnimateDiff_00279.png",
+            "fullpath": "/disco3/ComfyUI/output/AnimateDiff_00279-audio.mp4"
           }
         }
       }
     },
     {
-      "id": 8,
-      "type": "UNETLoader",
+      "id": 11,
+      "type": "CLIPTextEncode",
       "pos": [
-        3155.511698701804,
-        333.80451691507477
+        3285.7524238201127,
+        903.6908804595834
       ],
       "size": [
-        344.56146211382975,
-        112.78948709384235
+        400,
+        200
       ],
       "flags": {},
-      "order": 5,
+      "order": 8,
       "mode": 0,
-      "inputs": [],
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 4
+        }
+      ],
       "outputs": [
         {
-          "name": "MODEL",
-          "type": "MODEL",
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
           "links": [
-            105
+            135
           ]
         }
       ],
       "properties": {
         "cnr_id": "comfy-core",
-        "ver": "0.17.0",
-        "Node name for S&R": "UNETLoader",
+        "ver": "0.3.76",
+        "Node name for S&R": "CLIPTextEncode",
         "ue_properties": {
           "version": "7.0.1",
           "widget_ue_connectable": {
-            "unet_name": true,
-            "weight_dtype": true
+            "text": true
           }
         }
       },
       "widgets_values": [
-        "z_image_turbo_bf16.safetensors",
-        "default"
-      ]
+        "Anime screencap style, a traditional-style anime character's closed mouth, only by lines, happy"
+      ],
+      "color": "#232",
+      "bgcolor": "#353"
     },
     {
-      "id": 19,
-      "type": "LayerUtility: PurgeVRAM",
+      "id": 28,
+      "type": "VHS_LoadVideo",
       "pos": [
-        4619.826340950957,
-        280.4997422444343
+        2114.393529301723,
+        53.472703347048935
       ],
       "size": [
-        210,
-        82
+        259.8983612060547,
+        673.580492947445
       ],
       "flags": {},
-      "order": 12,
+      "order": 5,
       "mode": 0,
       "inputs": [
         {
-          "name": "anything",
-          "type": "*",
-          "link": 102
-        }
-      ],
-      "outputs": [],
-      "properties": {
-        "cnr_id": "comfyui_layerstyle",
-        "ver": "1.0.90",
-        "Node name for S&R": "LayerUtility: PurgeVRAM",
-        "ue_properties": {
-          "version": "7.0.1",
-          "widget_ue_connectable": {}
-        }
-      },
-      "widgets_values": [
-        true,
-        true
-      ],
-      "color": "rgba(38, 73, 116, 0.7)"
-    },
-    {
-      "id": 27,
-      "type": "LipSyncPipelineV6",
-      "pos": [
-        4066.721492682136,
-        581.6467764956593
-      ],
-      "size": [
-        321.81640625,
-        1490
-      ],
-      "flags": {},
-      "order": 10,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "audio",
-          "type": "AUDIO",
-          "link": 103
-        },
-        {
-          "name": "images",
-          "type": "IMAGE",
-          "link": 104
-        },
-        {
-          "name": "model",
-          "type": "MODEL",
-          "link": 105
-        },
-        {
-          "name": "model_patch",
-          "type": "MODEL_PATCH",
-          "link": 106
-        },
-        {
-          "name": "clip",
-          "type": "CLIP",
-          "link": 107
+          "name": "meta_batch",
+          "shape": 7,
+          "type": "VHS_BatchManager",
+          "link": null
         },
         {
           "name": "vae",
+          "shape": 7,
           "type": "VAE",
-          "link": 108
-        },
-        {
-          "name": "cond_closed",
-          "shape": 7,
-          "type": "CONDITIONING",
-          "link": 109
-        },
-        {
-          "name": "cond_half",
-          "shape": 7,
-          "type": "CONDITIONING",
-          "link": 110
-        },
-        {
-          "name": "cond_open",
-          "shape": 7,
-          "type": "CONDITIONING",
-          "link": 111
+          "link": null
         }
       ],
       "outputs": [
         {
-          "name": "video_path",
-          "type": "STRING",
-          "links": [
-            101,
-            102
-          ]
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": []
+        },
+        {
+          "name": "frame_count",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": null
         },
         {
           "name": "video_info",
@@ -693,11 +531,198 @@
         }
       ],
       "properties": {
+        "cnr_id": "comfyui-videohelpersuite",
+        "ver": "1.5.11",
+        "Node name for S&R": "VHS_LoadVideo",
+        "ue_properties": {
+          "version": "7.0.1",
+          "widget_ue_connectable": {
+            "video": true,
+            "force_rate": true,
+            "custom_width": true,
+            "custom_height": true,
+            "frame_load_cap": true,
+            "skip_first_frames": true,
+            "select_every_nth": true,
+            "format": true
+          }
+        }
+      },
+      "widgets_values": {
+        "video": "000010_female_warrior_shy_streetwear_outfit.mp4",
+        "force_rate": 0,
+        "custom_width": 0,
+        "custom_height": 0,
+        "frame_load_cap": 0,
+        "skip_first_frames": 0,
+        "select_every_nth": 1,
+        "format": "AnimateDiff",
+        "videopreview": {
+          "hidden": false,
+          "paused": false,
+          "params": {
+            "filename": "000010_female_warrior_shy_streetwear_outfit.mp4",
+            "type": "input",
+            "format": "video/mp4",
+            "force_rate": 0,
+            "custom_width": 0,
+            "custom_height": 0,
+            "frame_load_cap": 0,
+            "skip_first_frames": 0,
+            "select_every_nth": 1
+          }
+        }
+      }
+    },
+    {
+      "id": 30,
+      "type": "LipSyncPipelineV6",
+      "pos": [
+        4016.892519455063,
+        615.6673415822825
+      ],
+      "size": [
+        321.8333282470703,
+        1562
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 129
+        },
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 141
+        },
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 131
+        },
+        {
+          "name": "model_patch",
+          "type": "MODEL_PATCH",
+          "link": 132
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 133
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 134
+        },
+        {
+          "name": "cond_closed",
+          "shape": 7,
+          "type": "CONDITIONING",
+          "link": 135
+        },
+        {
+          "name": "cond_half",
+          "shape": 7,
+          "type": "CONDITIONING",
+          "link": 136
+        },
+        {
+          "name": "cond_open",
+          "shape": 7,
+          "type": "CONDITIONING",
+          "link": 137
+        }
+      ],
+      "outputs": [
+        {
+          "name": "video_path",
+          "type": "STRING",
+          "links": [
+            127,
+            128
+          ]
+        },
+        {
+          "name": "video_info",
+          "type": "VHS_VIDEOINFO",
+          "links": null
+        },
+        {
+          "name": "debug_dir",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
         "aux_id": "israelmarmar/anime-lipsync",
-        "ver": "bc44fe04c43361d8cff7dd29eb1a3a4271e1078d",
+        "ver": "e0f1d7c5af154ba678e54506ed76b936df6c8087",
         "Node name for S&R": "LipSyncPipelineV6",
         "ue_properties": {
-          "widget_ue_connectable": {}
+          "version": "7.0.1",
+          "widget_ue_connectable": {
+            "detection_model_path": true,
+            "fps": true,
+            "source_fps": true,
+            "lang_id": true,
+            "sim_threshold": true,
+            "motion_variance_factor": true,
+            "mask_dilation": true,
+            "mask_blur": true,
+            "vram_safety_margin_mb": true,
+            "compose_feather_px": true,
+            "enable_overlap": true,
+            "use_rembg": true,
+            "upscale_crop_face": true,
+            "mouth_conf": true,
+            "remove_mouth": true,
+            "save_debug_folder": true,
+            "verify_generated_mouth": true,
+            "mouth_regen_attempts": true,
+            "hed_detector_mode": true,
+            "mouth_padding_closed": true,
+            "mouth_padding_half": true,
+            "mouth_padding_open": true,
+            "mouth_brightness_closed": true,
+            "mouth_brightness_half": true,
+            "mouth_brightness_open": true,
+            "video_output_filename": true,
+            "enable_character_detect": true,
+            "character_query": true,
+            "character_margin": true,
+            "florence_model_id": true,
+            "lora_closed_path": true,
+            "lora_closed_strength_model": true,
+            "lora_closed_strength_clip": true,
+            "lora_half_path": true,
+            "lora_half_strength_model": true,
+            "lora_half_strength_clip": true,
+            "lora_open_path": true,
+            "lora_open_strength_model": true,
+            "lora_open_strength_clip": true,
+            "closed_steps": true,
+            "closed_denoise": true,
+            "closed_cfg": true,
+            "closed_cn_strength": true,
+            "closed_sampler": true,
+            "closed_scheduler": true,
+            "half_steps": true,
+            "half_denoise": true,
+            "half_cfg": true,
+            "half_cn_strength": true,
+            "half_sampler": true,
+            "half_scheduler": true,
+            "open_steps": true,
+            "open_denoise": true,
+            "open_cfg": true,
+            "open_cn_strength": true,
+            "open_sampler": true,
+            "open_scheduler": true
+          }
         }
       },
       "widgets_values": [
@@ -705,8 +730,8 @@
         12,
         12,
         "ipa",
-        0.7,
-        0.008,
+        0.92,
+        0.001,
         8,
         5,
         1024,
@@ -716,6 +741,9 @@
         2,
         0.1,
         true,
+        true,
+        false,
+        4,
         "auto",
         0,
         0,
@@ -737,24 +765,157 @@
         "full_open_z_image_turbo_lora.safetensors",
         1,
         1,
-        8,
+        4,
         0.6,
         1.2,
         0.6,
         "res_multistep",
         "simple",
-        8,
+        4,
         0.8,
         1,
         0.6,
         "res_multistep",
         "simple",
-        8,
+        4,
         0.9,
         1.2,
         0.6,
         "res_multistep",
         "simple"
+      ]
+    },
+    {
+      "id": 13,
+      "type": "CLIPTextEncode",
+      "pos": [
+        3269.07239023973,
+        1651.5556623147277
+      ],
+      "size": [
+        400,
+        200
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 6
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "links": [
+            137
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.76",
+        "Node name for S&R": "CLIPTextEncode",
+        "ue_properties": {
+          "version": "7.0.1",
+          "widget_ue_connectable": {
+            "text": true
+          }
+        }
+      },
+      "widgets_values": [
+        "Anime screencap style, no teeth, a traditional-style anime character's a little open mouth, pink or reddish roof of the mouth happy face"
+      ],
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 12,
+      "type": "CLIPTextEncode",
+      "pos": [
+        3311.545119264037,
+        1163.3953005852356
+      ],
+      "size": [
+        413.35670757158323,
+        318.67835378579184
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 5
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "links": [
+            136
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.76",
+        "Node name for S&R": "CLIPTextEncode",
+        "ue_properties": {
+          "version": "7.0.1",
+          "widget_ue_connectable": {
+            "text": true
+          }
+        }
+      },
+      "widgets_values": [
+        "Anime screencap style, no teeth, a traditional-style anime, a traditional-style anime character's half open  mouth, pink or reddish roof of the mouth without, happy face"
+      ],
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 10,
+      "type": "VAELoader",
+      "pos": [
+        3457.486261772614,
+        747.790251157248
+      ],
+      "size": [
+        270,
+        58
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            134
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.76",
+        "Node name for S&R": "VAELoader",
+        "ue_properties": {
+          "version": "7.0.1",
+          "widget_ue_connectable": {
+            "vae_name": true
+          }
+        }
+      },
+      "widgets_values": [
+        "ae.safetensors"
       ]
     },
     {
@@ -765,11 +926,11 @@
         348.2798542701708
       ],
       "size": [
-        259.8983612060547,
-        673.580492947445
+        256.6499938964844,
+        669.2188071640047
       ],
       "flags": {},
-      "order": 6,
+      "order": 7,
       "mode": 0,
       "inputs": [
         {
@@ -790,7 +951,7 @@
           "name": "IMAGE",
           "type": "IMAGE",
           "links": [
-            104
+            141
           ]
         },
         {
@@ -896,92 +1057,92 @@
       "AUDIO"
     ],
     [
-      101,
-      27,
-      0,
-      15,
-      2,
-      "STRING"
-    ],
-    [
-      102,
-      27,
+      127,
+      30,
       0,
       19,
       0,
       "STRING"
     ],
     [
-      103,
+      128,
+      30,
+      0,
+      15,
+      2,
+      "STRING"
+    ],
+    [
+      129,
       7,
       0,
-      27,
+      30,
       0,
       "AUDIO"
     ],
     [
-      104,
-      1,
-      0,
-      27,
-      1,
-      "IMAGE"
-    ],
-    [
-      105,
+      131,
       8,
       0,
-      27,
+      30,
       2,
       "MODEL"
     ],
     [
-      106,
+      132,
       9,
       0,
-      27,
+      30,
       3,
       "MODEL_PATCH"
     ],
     [
-      107,
+      133,
       14,
       0,
-      27,
+      30,
       4,
       "CLIP"
     ],
     [
-      108,
+      134,
       10,
       0,
-      27,
+      30,
       5,
       "VAE"
     ],
     [
-      109,
+      135,
       11,
       0,
-      27,
+      30,
       6,
       "CONDITIONING"
     ],
     [
-      110,
+      136,
       12,
       0,
-      27,
+      30,
       7,
       "CONDITIONING"
     ],
     [
-      111,
+      137,
       13,
       0,
-      27,
+      30,
       8,
       "CONDITIONING"
+    ],
+    [
+      141,
+      1,
+      0,
+      30,
+      1,
+      "IMAGE"
     ]
   ],
   "groups": [],
@@ -990,10 +1151,10 @@
     "ue_links": [],
     "links_added_by_ue": [],
     "ds": {
-      "scale": 0.598950000000001,
+      "scale": 0.338091660405711,
       "offset": [
-        -4088.882954408128,
-        -146.21483708684664
+        -1123.843335969044,
+        753.917578958046
       ]
     },
     "frontendVersion": "1.43.18",

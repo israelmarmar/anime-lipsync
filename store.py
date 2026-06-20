@@ -265,14 +265,19 @@ class DiskStore:
     def load_history_img_path(self, mt, fg):
         return self._hist_img(MOUTH_TYPE_NAMES[mt], fg)
 
-    def save_history(self, mt, fg, arr, prompt, crop_w=0, crop_h=0):
+    def save_history(self, mt, fg, arr, prompt, crop_w=0, crop_h=0,
+                     validation_ok=None, validation_msg=""):
         name = MOUTH_TYPE_NAMES[mt]
         self._save_webp_rgb(self._hist_img(name, fg), arr)
-        atomic_write(self._hist_json(name, fg), jdumps({
+        meta = {
             "mouth_type": mt, "mouth_type_name": name, "face_group": fg,
             "prompt": prompt, "w": arr.shape[1], "h": arr.shape[0],
             "crop_w": crop_w, "crop_h": crop_h,
-        }))
+        }
+        if validation_ok is not None:
+            meta["generated_mouth_valid"] = bool(validation_ok)
+            meta["generated_mouth_validation"] = validation_msg
+        atomic_write(self._hist_json(name, fg), jdumps(meta))
 
     # ── mouths ────────────────────────────────────────────────────────────────
 
@@ -315,6 +320,11 @@ class DiskStore:
                 if not all(k in meta for k in ("gx", "gy", "gw", "gh")):
                     return False
                 if int(meta.get("gw", 0)) <= 0 or int(meta.get("gh", 0)) <= 0:
+                    return False
+            if any(k in meta for k in ("rx", "ry", "rw", "rh")):
+                if not all(k in meta for k in ("rx", "ry", "rw", "rh")):
+                    return False
+                if float(meta.get("rw", 0.0)) <= 0.0 or float(meta.get("rh", 0.0)) <= 0.0:
                     return False
             if any(k in meta for k in ("ref_fx1", "ref_fy1", "ref_fw", "ref_fh")):
                 if not all(k in meta for k in ("ref_fx1", "ref_fy1", "ref_fw", "ref_fh")):
@@ -377,6 +387,15 @@ class DiskStore:
                     "gw": pos["gw"],
                     "gh": pos["gh"],
                 })
+            if all(k in pos for k in ("rx", "ry", "rw", "rh")):
+                meta.update({
+                    "rx": pos["rx"],
+                    "ry": pos["ry"],
+                    "rw": pos["rw"],
+                    "rh": pos["rh"],
+                })
+            if "alpha_source" in pos:
+                meta["alpha_source"] = pos["alpha_source"]
             if all(k in pos for k in ("ref_fx1", "ref_fy1", "ref_fw", "ref_fh")):
                 meta.update({
                     "ref_fx1": pos["ref_fx1"],

@@ -1,20 +1,106 @@
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+import torch
 from PIL import Image
 
 from .constants import MOUTH_TYPE_NAMES
 from .store import DiskStore
 from .utils import cuda_cleanup, vram_info
-from .phase0 import _best_detection, _dynamic_upscale, _run_yolo, YOLO_MOUTH_CLASS_ID
+from .phase1 import _detect_anatomical_mouth
 
 try:
     from rembg import remove as _rembg_remove
     _REMBG_AVAILABLE = True
 except ImportError:
     _REMBG_AVAILABLE = False
+
+_BEN2_LOCK = threading.Lock()
+_BEN2_NODE = None
+_BEN2_WARNED = False
+
+
+def _load_easy_image_rembg_node():
+    global _BEN2_NODE
+    with _BEN2_LOCK:
+        if _BEN2_NODE is not None:
+            return _BEN2_NODE
+
+        try:
+            from nodes import NODE_CLASS_MAPPINGS
+        except Exception as exc:
+            raise ImportError("NODE_CLASS_MAPPINGS do ComfyUI indisponível.") from exc
+
+        cls = NODE_CLASS_MAPPINGS.get("easy imageRemBg")
+        if cls is None:
+            raise KeyError("Custom node 'easy imageRemBg' não está carregado.")
+
+        _BEN2_NODE = cls()
+        print("[F2] BEN2 via easy imageRemBg carregado.")
+        return _BEN2_NODE
+
+
+def _tensor_to_np_image(tensor: torch.Tensor) -> np.ndarray:
+    arr = tensor.detach().cpu().numpy()
+    if arr.ndim == 4:
+        arr = arr[0]
+    arr = np.nan_to_num(arr).clip(0.0, 1.0)
+    return (arr * 255.0).round().astype(np.uint8)
+
+
+def _easy_ben2_rgba(rgb_crop: np.ndarray,
+                    refine_foreground: bool = False) -> Optional[np.ndarray]:
+    global _BEN2_WARNED
+    try:
+        node = _load_easy_image_rembg_node()
+        images = torch.from_numpy(rgb_crop.astype(np.float32) / 255.0).unsqueeze(0)
+        with _BEN2_LOCK:
+            out = node.remove(
+                rem_mode="BEN2",
+                image_output="Hide",
+                save_prefix="ComfyUI",
+                torchscript_jit=False,
+                add_background="none",
+                refine_foreground=refine_foreground,
+                images=images,
+            )
+
+        out_image = out[0] if isinstance(out, (tuple, list)) else out["result"][0]
+        out_np = _tensor_to_np_image(out_image)
+        if out_np.ndim == 2:
+            out_np = np.dstack([rgb_crop, out_np])
+        elif out_np.shape[-1] == 3:
+            mask_np = None
+            if isinstance(out, (tuple, list)) and len(out) > 1:
+                mask_np = _tensor_to_np_image(out[1])
+            if mask_np is None:
+                alpha = np.full(rgb_crop.shape[:2], 255, dtype=np.uint8)
+            else:
+                alpha = mask_np[..., 0] if mask_np.ndim == 3 else mask_np
+            out_np = np.dstack([out_np[:, :, :3], alpha])
+        elif out_np.shape[-1] > 4:
+            out_np = out_np[:, :, :4]
+
+        if out_np.shape[:2] != rgb_crop.shape[:2]:
+            out_np = cv2.resize(out_np, (rgb_crop.shape[1], rgb_crop.shape[0]),
+                                interpolation=cv2.INTER_LINEAR)
+        return out_np.astype(np.uint8)
+    except Exception as exc:
+        if not _BEN2_WARNED:
+            print(f"[F2] easy imageRemBg BEN2 indisponível; usando fallback local/rembg: {exc}")
+            _BEN2_WARNED = True
+        return None
+
+
+def _easy_ben2_alpha(rgb_crop: np.ndarray,
+                     refine_foreground: bool = False) -> Optional[np.ndarray]:
+    rgba = _easy_ben2_rgba(rgb_crop, refine_foreground=refine_foreground)
+    if rgba is None:
+        return None
+    return rgba[:, :, 3].astype(np.float32) / 255.0
 
 
 def _expand_bbox(bx1: int, by1: int, bx2: int, by2: int,
@@ -54,6 +140,10 @@ def _ellipse_mask(h: int, w: int, scale_x: float, scale_y: float,
 
 def _open_mouth_rgba(mouth_crop: np.ndarray, mouth_type: int,
                      use_rembg: bool = False) -> np.ndarray:
+    ben2_rgba = _easy_ben2_rgba(mouth_crop) if use_rembg else None
+    if ben2_rgba is not None:
+        return ben2_rgba
+
     if use_rembg and _REMBG_AVAILABLE:
         rembg_rgba = np.array(
             _rembg_remove(Image.fromarray(mouth_crop)).convert("RGBA"), dtype=np.uint8)
@@ -134,7 +224,15 @@ def _mouth_cached_pos_to_frame(pos: dict,
                                frame_shape: Tuple[int, int],
                                face_bbox=None) -> Tuple[int, int, int, int]:
     H_fr, W_fr = frame_shape
-    if face_bbox is not None and all(k in pos for k in ("ref_fx1", "ref_fy1", "ref_fw", "ref_fh")):
+    if face_bbox is not None and all(k in pos for k in ("rx", "ry", "rw", "rh")):
+        fx1, fy1, fx2, fy2 = face_bbox
+        face_w = max(1, int(fx2) - int(fx1))
+        face_h = max(1, int(fy2) - int(fy1))
+        ax = int(fx1) + int(round(float(pos.get("rx", 0.0)) * face_w))
+        ay = int(fy1) + int(round(float(pos.get("ry", 0.0)) * face_h))
+        aw = int(round(float(pos.get("rw", 0.0)) * face_w))
+        ah = int(round(float(pos.get("rh", 0.0)) * face_h))
+    elif face_bbox is not None and all(k in pos for k in ("ref_fx1", "ref_fy1", "ref_fw", "ref_fh")):
         fx1, fy1, fx2, fy2 = face_bbox
         face_w = max(1, int(fx2) - int(fx1))
         face_h = max(1, int(fy2) - int(fy1))
@@ -228,15 +326,12 @@ def _detect_mouth(face_np: np.ndarray,
                              interpolation=cv2.INTER_LANCZOS4)
         fH, fW = face_np.shape[:2]
 
-    # Upscale para YOLO detectar com maior precisão
-    up_W, up_H = _dynamic_upscale(fH, fW, upscale_crop_face)
-    face_up = cv2.resize(face_np, (up_W, up_H), interpolation=cv2.INTER_LANCZOS4)
-
-    xyxy, confs, classes = _run_yolo(detection_model, face_up, conf_mouth)
-    mouth_det = _best_detection(xyxy, confs, classes, YOLO_MOUTH_CLASS_ID)
-    del xyxy, confs, classes, face_up
+    # Seleciona somente bocas na região anatômica entre nariz e queixo.
+    mouth_det, up_W, up_H, anatomy_msg = _detect_anatomical_mouth(
+        face_np, detection_model, conf_mouth, upscale_crop_face)
 
     if mouth_det is None:
+        print(f"  [F2] Boca rejeitada por posição anatômica: {anatomy_msg}")
         return None
 
     (bx1u, by1u, bx2u, by2u), _ = mouth_det
@@ -269,6 +364,23 @@ def _detect_mouth(face_np: np.ndarray,
         # ── neutral_closed: preserva linhas, não uma mancha de pele ──────────
         # Para boca fechada, preencher a elipse inteira carrega pele gerada com
         # tom diferente. Aqui o alpha fica restrito a linhas/escuridão dos lábios.
+        ben2_rgba = _easy_ben2_rgba(mouth_crop) if use_rembg else None
+        if ben2_rgba is not None:
+            mouth_rgba = ben2_rgba
+            del mouth_crop
+
+            target_w = max(1, int(fx2) - int(fx1))
+            target_h = max(1, int(fy2) - int(fy1))
+            frame_sx = target_w / max(1, fW)
+            frame_sy = target_h / max(1, fH)
+
+            abs_x = max(0, min(W_fr - 1, int(fx1) + int(round(bx1 * frame_sx))))
+            abs_y = max(0, min(H_fr - 1, int(fy1) + int(round(by1 * frame_sy))))
+            abs_w = min(max(1, int(round((bx2 - bx1) * frame_sx))), W_fr - abs_x)
+            abs_h = min(max(1, int(round((by2 - by1) * frame_sy))), H_fr - abs_y)
+
+            return mouth_rgba, abs_x, abs_y, abs_w, abs_h
+
         ch, cw = mouth_crop.shape[:2]
 
         gray = cv2.cvtColor(mouth_crop, cv2.COLOR_RGB2GRAY)
@@ -296,6 +408,10 @@ def _detect_mouth(face_np: np.ndarray,
         support_k = max(3, (min(ch, cw) // 14) | 1)
         support_f = cv2.GaussianBlur(support, (support_k, support_k), 0).astype(np.float32) / 255.0
 
+        ben2_alpha = _easy_ben2_alpha(mouth_crop) if use_rembg else None
+        if ben2_alpha is not None:
+            support_f = np.maximum(support_f, ben2_alpha * 0.85)
+
         mask_f = line_mask * support_f
         mask_f[mask_f < 0.18] = 0.0
         mask_f = cv2.GaussianBlur(mask_f, (3, 3), 0)
@@ -306,7 +422,7 @@ def _detect_mouth(face_np: np.ndarray,
         mouth_rgba = np.dstack([mouth_crop, alpha8])
     else:
         # ── half_open / fully_open: combina YOLO + rembg + máscara de cor ───
-        # O rembg sozinho às vezes preserva pele ao redor dos lábios; a máscara
+        # O BEN2/rembg sozinho às vezes preserva pele ao redor dos lábios; a máscara
         # abaixo restringe o alpha a regiões escuras/coloridas típicas da boca.
         mouth_rgba = _open_mouth_rgba(mouth_crop, mouth_type, use_rembg=use_rembg)
 
@@ -564,6 +680,10 @@ def process_single(q: int,
                 "gy": ay - int(fy1),
                 "gw": aw,
                 "gh": ah,
+                "rx": (ax - int(fx1)) / max(1, cache_ref_shape[1]),
+                "ry": (ay - int(fy1)) / max(1, cache_ref_shape[0]),
+                "rw": aw / max(1, cache_ref_shape[1]),
+                "rh": ah / max(1, cache_ref_shape[0]),
                 "ref_fx1": int(fx1),
                 "ref_fy1": int(fy1),
                 "ref_fw": cache_ref_shape[1],
@@ -571,6 +691,8 @@ def process_single(q: int,
                 "generated_face_w": cache_ref_shape[1],
                 "generated_face_h": cache_ref_shape[0],
             })
+        if use_rembg:
+            pos["alpha_source"] = "easy_imageRemBg_BEN2"
         cached = {"rgba": rgba, "pos": pos}
         bbox_cache[cache_key] = cached
         if not store.has_mouth_cache(mt, fg, epoch=epoch):
@@ -637,13 +759,13 @@ def run_phase2(store: DiskStore,
                mouth_brightness_per_type: Dict[int, float] = None,
                use_rembg: bool = False) -> None:
     n_workers = max(1, n_workers)
-    if use_rembg and not _REMBG_AVAILABLE:
-        print("[F2] rembg não disponível; usando máscara YOLO/cor para recorte de boca.")
+    if use_rembg:
+        print("[F2] BEN2 ativo para remover pele do recorte da boca quando disponível.")
 
     print(f"\n[F2] Bocas por frame estabilizadas — modelo unico face+boca, {n_frames} frames, {n_workers} workers, "
           f"upscale=auto(min={upscale_crop_face:.1f}x) conf={conf_mouth} "
           f"padding={mouth_padding_per_type} brightness={mouth_brightness_per_type} "
-          f"rembg={'on' if use_rembg and _REMBG_AVAILABLE else 'off'}...")
+          f"BEN2={'on' if use_rembg else 'off'}...")
 
     completed = 0
     log_step = max(1, n_frames // 10)
