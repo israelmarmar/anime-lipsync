@@ -131,7 +131,9 @@ def _overlap_worker(worker_id: int,
                     conf_mouth: float,
                     mouth_padding_per_type: Dict = None,
                     mouth_brightness_per_type: Dict = None,
-                    use_rembg: bool = False) -> None:
+                    use_rembg: bool = False,
+                    use_open_for_half: bool = False,
+                    half_open_height_scale: float = 0.55) -> None:
     from ultralytics import YOLO
     try:
         detection_model = YOLO(detection_model_path)
@@ -153,7 +155,9 @@ def _overlap_worker(worker_id: int,
             process_single(q, store, mouth_types, detection_model, canonical_cache,
                            upscale_crop_face, conf_mouth,
                            mouth_padding_per_type, mouth_brightness_per_type,
-                           use_rembg=use_rembg)
+                           use_rembg=use_rembg,
+                           use_open_for_half=use_open_for_half,
+                           half_open_height_scale=half_open_height_scale)
 
             compose_frame(q, store, feather_px)
 
@@ -189,7 +193,9 @@ def launch_overlap_workers(ready_queue: Queue,
                             conf_mouth: float = 0.1,
                             mouth_padding_per_type: Dict = None,
                             mouth_brightness_per_type: Dict = None,
-                            use_rembg: bool = False
+                            use_rembg: bool = False,
+                            use_open_for_half: bool = False,
+                            half_open_height_scale: float = 0.55,
                             ) -> Tuple[List[threading.Thread], threading.Event]:
     import os
     n_workers = max(1, min(
@@ -200,7 +206,9 @@ def launch_overlap_workers(ready_queue: Queue,
     print(f"[Overlap] Lançando {n_workers} workers com YOLO unico "
           f"(upscale=auto(min={upscale_crop_face:.1f}x) conf={conf_mouth} "
           f"padding={mouth_padding_per_type} brightness={mouth_brightness_per_type} "
-          f"BEN2={'on' if use_rembg else 'off'})...")
+          f"BEN2={'on' if use_rembg else 'off'} "
+          f"half_from_open={'on' if use_open_for_half else 'off'} "
+          f"half_height={half_open_height_scale:.2f})...")
 
     stop_event    = threading.Event()
     cache_lock    = threading.Lock()
@@ -216,7 +224,7 @@ def launch_overlap_workers(ready_queue: Queue,
                   stop_event, processed_ctr, counter_lock,
                   upscale_crop_face, conf_mouth,
                   mouth_padding_per_type, mouth_brightness_per_type,
-                  use_rembg),
+                  use_rembg, use_open_for_half, half_open_height_scale),
             daemon=True, name=f"overlap-{i}",
         )
         t.start()

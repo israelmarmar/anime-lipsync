@@ -95,6 +95,8 @@ class LipSyncZTurboPipeline:
                 "save_debug_folder":     ("BOOLEAN", {"default": False, "tooltip": "Copia a pasta temporária de trabalho para o output do ComfyUI e retorna o caminho em debug_dir."}),
                 "verify_generated_mouth": ("BOOLEAN", {"default": True, "tooltip": "Valida com YOLO se a face gerada contém boca antes de cachear/sobrepor."}),
                 "mouth_regen_attempts":  ("INT",     {"default": 2,    "min": 0,    "max": 8, "tooltip": "Quantas novas amostras KSampler tentar quando a boca gerada não for detectada."}),
+                "use_open_for_half":     ("BOOLEAN", {"default": False, "tooltip": "Gera fully_open para half_open e reduz apenas a altura do recorte na composição."}),
+                "half_open_height_scale": ("FLOAT", {"default": 0.55, "min": 0.1, "max": 1.0, "step": 0.05, "tooltip": "Escala vertical da boca aberta usada como half_open."}),
                 "hed_detector_mode":      (["auto", "controlnet_aux", "comfy_hed"], {
                     "default": "auto",
                     "tooltip": (
@@ -199,6 +201,8 @@ class LipSyncZTurboPipeline:
         save_debug_folder: bool = False,
         verify_generated_mouth: bool = True,
         mouth_regen_attempts: int = 2,
+        use_open_for_half: bool = False,
+        half_open_height_scale: float = 0.55,
         hed_detector_mode: str = "auto",
         # Padding por tipo
         mouth_padding_closed: int = 0,
@@ -350,6 +354,8 @@ class LipSyncZTurboPipeline:
                     mouth_padding_per_type=mouth_padding_per_type,
                     mouth_brightness_per_type=mouth_brightness_per_type,
                     use_rembg=use_rembg,
+                    use_open_for_half=use_open_for_half,
+                    half_open_height_scale=half_open_height_scale,
                 )
 
                 with torch.inference_mode():
@@ -370,6 +376,7 @@ class LipSyncZTurboPipeline:
                         conf_mouth=mouth_conf,
                         verify_generated_mouth=verify_generated_mouth,
                         mouth_regen_attempts=mouth_regen_attempts,
+                        use_open_for_half=use_open_for_half,
                     )
 
                 timeout_s = n_frames * 5 + 120
@@ -402,6 +409,7 @@ class LipSyncZTurboPipeline:
                         conf_mouth=mouth_conf,
                         verify_generated_mouth=verify_generated_mouth,
                         mouth_regen_attempts=mouth_regen_attempts,
+                        use_open_for_half=use_open_for_half,
                     )
 
                 n_workers_f2 = compute_workers(vram_safety_margin_mb)
@@ -411,6 +419,8 @@ class LipSyncZTurboPipeline:
                     mouth_padding_per_type=mouth_padding_per_type,
                     mouth_brightness_per_type=mouth_brightness_per_type,
                     use_rembg=use_rembg,
+                    use_open_for_half=use_open_for_half,
+                    half_open_height_scale=half_open_height_scale,
                 )
 
                 n_workers_f3 = compute_workers(vram_safety_margin_mb)

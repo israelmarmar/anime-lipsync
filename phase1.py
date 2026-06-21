@@ -138,9 +138,9 @@ def _detect_anatomical_mouth(face_rgb: np.ndarray,
     return None, up_w, up_h, last_reason
 
 
-def _closed_mouth_contour_only(face_rgb: np.ndarray,
-                               mouth_bbox,
-                               detector_shape: Tuple[int, int]) -> Tuple[bool, str]:
+def _closed_mouth_after_ben2(face_rgb: np.ndarray,
+                             mouth_bbox,
+                             detector_shape: Tuple[int, int]) -> Tuple[bool, str]:
     image_h, image_w = face_rgb.shape[:2]
     det_h, det_w = detector_shape
     x1u, y1u, x2u, y2u = [int(v) for v in mouth_bbox]
@@ -151,67 +151,58 @@ def _closed_mouth_contour_only(face_rgb: np.ndarray,
     if x2 <= x1 or y2 <= y1:
         return False, "crop da boca fechada vazio"
 
-    crop = face_rgb[y1:y2, x1:x2]
+    bw = max(1, x2 - x1)
+    bh = max(1, y2 - y1)
+    pad_x = max(2, int(round(bw * 0.12)))
+    pad_y = max(2, int(round(bh * 0.30)))
+    x1 = max(0, x1 - pad_x); x2 = min(image_w, x2 + pad_x)
+    y1 = max(0, y1 - pad_y); y2 = min(image_h, y2 + pad_y)
+
+    crop = face_rgb[y1:y2, x1:x2].copy()
     if crop.shape[0] < 2 or crop.shape[1] < 4:
         return False, "crop da boca fechada pequeno demais"
 
-    scale = max(1.0, 160.0 / max(1, crop.shape[1]))
-    work_w = max(32, int(round(crop.shape[1] * scale)))
-    work_h = max(16, int(round(crop.shape[0] * scale)))
-    work = cv2.resize(crop, (work_w, work_h), interpolation=cv2.INTER_CUBIC)
-    gray = cv2.cvtColor(work, cv2.COLOR_RGB2GRAY)
-    hsv = cv2.cvtColor(work, cv2.COLOR_RGB2HSV)
+    try:
+        # Import local evita ciclo durante o carregamento dos módulos.
+        from .phase2 import _easy_ben2_rgba
+        ben2_rgba = _easy_ben2_rgba(crop)
+    except Exception as exc:
+        return False, f"BEN2 indisponível na validação da boca fechada: {exc}"
+    if ben2_rgba is None or ben2_rgba.ndim != 3 or ben2_rgba.shape[2] < 4:
+        return False, "BEN2 não retornou RGBA para boca fechada"
 
-    r = work[:, :, 0].astype(np.int16)
-    g = work[:, :, 1].astype(np.int16)
-    b = work[:, :, 2].astype(np.int16)
-    dark = gray < min(112, int(np.percentile(gray, 35)) + 18)
-    mouth_color = (
-        (hsv[:, :, 1] > 72)
-        & (r > g + 9)
-        & (r > b + 4)
-        & (gray < 178)
-    )
-    foreground = (dark | mouth_color).astype(np.uint8)
-    foreground = cv2.morphologyEx(
-        foreground, cv2.MORPH_CLOSE,
-        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+    foreground = (ben2_rgba[:, :, 3] >= 32).astype(np.uint8)
+    count, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        foreground, connectivity=8)
+    if count <= 1:
+        return False, "BEN2 removeu toda a boca fechada"
 
-    ix1, ix2 = int(work_w * 0.12), max(1, int(work_w * 0.88))
-    iy1, iy2 = int(work_h * 0.12), max(1, int(work_h * 0.88))
-    inner = foreground[iy1:iy2, ix1:ix2]
-    if inner.size == 0:
-        return False, "região interna da boca fechada vazia"
+    crop_cx = crop.shape[1] * 0.5
+    crop_cy = crop.shape[0] * 0.5
+    candidates = []
+    for label in range(1, count):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        cx, cy = centroids[label]
+        center_penalty = abs(cx - crop_cx) / max(1, crop.shape[1])
+        center_penalty += abs(cy - crop_cy) / max(1, crop.shape[0])
+        candidates.append((area * (1.0 - min(0.8, center_penalty)), label))
+    _, best_label = max(candidates)
 
-    fill_ratio = float(inner.mean())
-    distance = cv2.distanceTransform(foreground, cv2.DIST_L2, 5)
-    thickness_ratio = float(distance.max() * 2.0 / max(1, work_h))
+    aw = int(stats[best_label, cv2.CC_STAT_WIDTH])
+    ah = int(stats[best_label, cv2.CC_STAT_HEIGHT])
+    if aw <= 0 or ah <= 0:
+        return False, "bbox alpha do BEN2 vazio"
 
-    core_kernel_h = max(3, (int(round(work_h * 0.18)) | 1))
-    core_kernel_w = max(3, (int(round(work_h * 0.12)) | 1))
-    core = cv2.erode(
-        foreground,
-        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (core_kernel_w, core_kernel_h)),
-        iterations=1,
-    )
-    core_ratio = float(core[iy1:iy2, ix1:ix2].mean())
-
-    # Uma boca fechada pode ter duas linhas de lábio, mas não uma cavidade
-    # espessa e preenchida como uma boca entreaberta.
-    if fill_ratio > 0.38 and thickness_ratio > 0.34:
+    rel_height = ah / max(1, image_h)
+    max_height = 0.028
+    if rel_height > max_height:
         return False, (
-            f"boca fechada com preenchimento interno fill={fill_ratio:.3f} "
-            f"thickness={thickness_ratio:.3f} core={core_ratio:.3f}"
-        )
-    if core_ratio > 0.11 or thickness_ratio > 0.48:
-        return False, (
-            f"boca fechada parece aberta fill={fill_ratio:.3f} "
-            f"thickness={thickness_ratio:.3f} core={core_ratio:.3f}"
+            f"alpha BEN2 da boca fechada grosso demais height={rel_height:.4f} "
+            f"max={max_height:.4f}"
         )
 
     return True, (
-        f"contour_only fill={fill_ratio:.3f} "
-        f"thickness={thickness_ratio:.3f} core={core_ratio:.3f}"
+        f"ben2_height_only height={rel_height:.4f} max={max_height:.4f}"
     )
 
 
@@ -219,8 +210,7 @@ def _generated_mouth_present(face_rgb: np.ndarray,
                              detection_model,
                              conf_mouth: float,
                              upscale_crop_face: float,
-                             mouth_type: int,
-                             is_silence: bool = False) -> Tuple[bool, str]:
+                             mouth_type: int) -> Tuple[bool, str]:
     if detection_model is None:
         return True, "sem verificador"
     h, w = face_rgb.shape[:2]
@@ -240,34 +230,12 @@ def _generated_mouth_present(face_rgb: np.ndarray,
     rel_height = bh / max(1, up_h)
     aspect = bw / max(1, bh)
     rel_area = (bw * bh) / max(1, up_w * up_h)
-    if mouth_type == 0:
-        max_height = 0.02
-        min_aspect = 1.60
-        if rel_height > max_height:
-            return False, (
-                f"boca fechada grossa demais height={rel_height:.4f} "
-                f"max={max_height:.4f} conf={det_conf:.3f}"
-            )
-        if aspect < min_aspect:
-            return False, (
-                f"boca fechada pouco horizontal aspect={aspect:.2f} "
-                f"min={min_aspect:.2f} conf={det_conf:.3f}"
-            )
-    if is_silence:
-        min_width = 0.055
-        if rel_width < min_width:
-            return False, (
-                f"boca de silêncio estreita demais width={rel_width:.4f} "
-                f"min={min_width:.4f} conf={det_conf:.3f}"
-            )
-
-    min_area = 0.000010 if mouth_type == 0 else 0.000035
-    if rel_area < min_area:
+    if mouth_type != 0 and rel_area < 0.000035:
         return False, f"boca pequena demais area={rel_area:.6f} conf={det_conf:.3f}"
 
     contour_msg = ""
     if mouth_type == 0:
-        contour_ok, contour_msg = _closed_mouth_contour_only(
+        contour_ok, contour_msg = _closed_mouth_after_ben2(
             face_rgb, (x1, y1, x2, y2), (up_h, up_w))
         if not contour_ok:
             return False, contour_msg
@@ -631,6 +599,7 @@ def run_phase1(store: DiskStore,
                conf_mouth: float = 0.1,
                verify_generated_mouth: bool = True,
                mouth_regen_attempts: int = 2,
+               use_open_for_half: bool = False,
                ) -> None:
     """
     lora_cfg formato:
@@ -719,7 +688,7 @@ def run_phase1(store: DiskStore,
         
         if last_feat is not None:
             sim = _face_similarity(last_feat, feat)
-            moved, motion = _face_bbox_moved(
+            _, motion = _face_bbox_moved(
                 last_face_bbox, face_bbox, motion_variance_factor)
             if sim <= sim_threshold:
                 removed = store.clear_mouth_cache()
@@ -729,11 +698,7 @@ def run_phase1(store: DiskStore,
                 print(f"  [F1] Crop da face sem boca mudou frame {q} "
                       f"(sim={sim:.3f}) → group={face_group}; "
                       f"caches closed/half/open limpos (arquivos)")
-            elif moved:
-                mouth_cache_epoch += 1
-                print(f"  [F1] Movimento da face detectado frame {q} "
-                      f"(motion={motion:.3f}, sim={sim:.3f}) → mouth_epoch={mouth_cache_epoch}; "
-                      f"caches closed/half/open limpos (arquivos)")
+
         last_feat = feat
         last_face_bbox = face_bbox
         frame_meta.append((q, mt, face_group, mouth_cache_epoch))
@@ -765,6 +730,7 @@ def run_phase1(store: DiskStore,
 
         precomputed: Dict[Tuple[int, int], dict] = {}
         for (mt, fg), q_repr in pairs_to_gen.items():
+            generation_mt = 2 if use_open_for_half and mt == 1 else mt
             face_bbox = store.load_face_bbox(q_repr)
             nomouth   = store.load_nomouth(q_repr)
             face_inp  = (nomouth[face_bbox[1]:face_bbox[3], face_bbox[0]:face_bbox[2]]
@@ -788,7 +754,7 @@ def run_phase1(store: DiskStore,
                       f"crop {crop_w}×{crop_h} (já 512px)")
 
             face_t = np2t(face_for_diff)
-            dcfg = cfg_per_type[mt]
+            dcfg = cfg_per_type[generation_mt]
 
             hed_t, hed_source = _make_control_scribble(
                 face_for_diff, face_t, preprocessor,
@@ -799,7 +765,7 @@ def run_phase1(store: DiskStore,
 
             cn_out  = qwenimagediffsynthcn.diffsynth_controlnet(
                 strength=float(dcfg.get("controlnet_strength", 0.6)),
-                model=model_per_type[mt],
+                model=model_per_type[generation_mt],
                 model_patch=model_patch_obj,
                 vae=vae_obj, image=hed_t)
             patched = get_node_output(cn_out, 0)
@@ -811,10 +777,11 @@ def run_phase1(store: DiskStore,
 
             precomputed[(mt, fg)] = dict(
                 patched=patched, latent_in=latent_in,
-                mt=mt, fg=fg, q_repr=q_repr,
+                mt=mt, generation_mt=generation_mt, fg=fg, q_repr=q_repr,
                 crop_w=crop_w, crop_h=crop_h,
-                is_silence=(phonemes[q_repr] == "_"),
             )
+            if generation_mt != mt:
+                print(f"  [F1] half_open group={fg} será gerada como fully_open")
             del nomouth
 
         cuda_cleanup()
@@ -835,7 +802,8 @@ def run_phase1(store: DiskStore,
 
             latents_out = []
             for (mt, fg), pc in blk:
-                dcfg = cfg_per_type[mt]
+                generation_mt = int(pc.get("generation_mt", mt))
+                dcfg = cfg_per_type[generation_mt]
                 try:
                     sampled = ksampler.sample(
                         seed=random.randint(1, 2**64),
@@ -845,7 +813,7 @@ def run_phase1(store: DiskStore,
                         scheduler=dcfg.get("scheduler", "simple"),
                         denoise=float(dcfg["denoise"]),
                         model=pc["patched"],
-                        positive=pos_conds[mt],
+                        positive=pos_conds[generation_mt],
                         negative=neg_cond,
                         latent_image=pc["latent_in"],
                     )
@@ -873,7 +841,8 @@ def run_phase1(store: DiskStore,
                         if attempt == 0:
                             cur_latent = latent
                         else:
-                            dcfg = cfg_per_type[mt]
+                            generation_mt = int(pc.get("generation_mt", mt))
+                            dcfg = cfg_per_type[generation_mt]
                             sampled = ksampler.sample(
                                 seed=random.randint(1, 2**64),
                                 steps=int(dcfg.get("steps", 4)),
@@ -882,7 +851,7 @@ def run_phase1(store: DiskStore,
                                 scheduler=dcfg.get("scheduler", "simple"),
                                 denoise=float(dcfg["denoise"]),
                                 model=pc["patched"],
-                                positive=pos_conds[mt],
+                                positive=pos_conds[generation_mt],
                                 negative=neg_cond,
                                 latent_image=pc["latent_in"],
                             )
@@ -901,10 +870,11 @@ def run_phase1(store: DiskStore,
                                                     interpolation=_cv2.INTER_LANCZOS4)
 
                         if verify_model is not None:
+                            generation_mt = int(pc.get("generation_mt", mt))
                             validation_ok, validation_msg = _generated_mouth_present(
-                                candidate, verify_model, conf_mouth, upscale_crop_face, mt,
-                                is_silence=bool(pc.get("is_silence", False)))
-                            if validation_ok and mt == 0:
+                                candidate, verify_model, conf_mouth, upscale_crop_face,
+                                generation_mt)
+                            if validation_ok and generation_mt == 0:
                                 candidate = _enhance_closed_mouth_contrast(
                                     candidate, verify_model, conf_mouth, upscale_crop_face)
                                 validation_msg += " contrast=closed_mouth"
@@ -935,11 +905,13 @@ def run_phase1(store: DiskStore,
                     free_vram(pc["patched"], pc["latent_in"])
 
                     target_w, target_h = pc["crop_w"], pc["crop_h"]
+                    generation_mt = int(pc.get("generation_mt", mt))
 
-                    store.save_history(mt, fg, result, MOUTH_TYPE_PROMPTS[mt],
+                    store.save_history(mt, fg, result, MOUTH_TYPE_PROMPTS[generation_mt],
                                        crop_w=target_w, crop_h=target_h,
                                        validation_ok=validation_ok,
-                                       validation_msg=validation_msg)
+                                       validation_msg=validation_msg,
+                                       generated_mouth_type=generation_mt)
                     del result
                     print(f"  [Saved] {MOUTH_TYPE_NAMES[mt]} group={fg} "
                           f"verify={'ok' if validation_ok else 'fail'} ({validation_msg})")

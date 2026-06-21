@@ -116,8 +116,10 @@ Ele usa:
 - `vram_safety_margin_mb`: margem de VRAM antes de lançar workers.
 - `enable_overlap`: processa F2/F3 em paralelo com a F1 quando possível.
 - `save_debug_folder`: copia a pasta temporária de trabalho para o output do ComfyUI e retorna o caminho em `debug_dir`.
-- `verify_generated_mouth`: valida com YOLO se a face gerada contém boca entre nariz e queixo; para `neutral_closed`, também exige apenas contorno fino de lábio, sem cavidade interna preenchida.
+- `verify_generated_mouth`: valida com YOLO se a face gerada contém boca entre nariz e queixo; para `neutral_closed`, primeiro remove a pele com BEN2 e valida somente a espessura vertical do alpha resultante.
 - `mouth_regen_attempts`: número de rerenders KSampler quando a boca não é detectada na face gerada.
+- `use_open_for_half`: usa a geração `fully_open` nos frames `half_open` e reduz verticalmente apenas o recorte RGBA da boca.
+- `half_open_height_scale`: escala da altura da boca aberta usada como `half_open`; `0.55` mantém 55% da altura original.
 - `video_output_filename`: nome base do MP4 final.
 
 ### Detecção e Máscara

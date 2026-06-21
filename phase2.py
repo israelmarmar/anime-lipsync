@@ -294,7 +294,10 @@ def _detect_mouth(face_np: np.ndarray,
                   mouth_type: int = 0,
                   mouth_padding_per_type: Dict[int, int] = None,
                   mouth_brightness_per_type: Dict[int, float] = None,
-                  use_rembg: bool = False) -> Optional[Tuple[np.ndarray, int, int, int, int]]:
+                  use_rembg: bool = False,
+                  use_open_for_half: bool = False,
+                  half_open_height_scale: float = 0.55
+                  ) -> Optional[Tuple[np.ndarray, int, int, int, int]]:
     """
     Detecta a boca na face gerada, faz rembg e devolve
     (rgba, abs_x, abs_y, abs_w, abs_h) ou None.
@@ -437,6 +440,14 @@ def _detect_mouth(face_np: np.ndarray,
     abs_y = max(0, min(H_fr - 1, int(fy1) + int(round(by1 * frame_sy))))
     abs_w = min(max(1, int(round((bx2 - bx1) * frame_sx))), W_fr - abs_x)
     abs_h = min(max(1, int(round((by2 - by1) * frame_sy))), H_fr - abs_y)
+
+    if use_open_for_half and mouth_type == 1:
+        scale_h = min(1.0, max(0.1, float(half_open_height_scale)))
+        old_h = abs_h
+        center_y = abs_y + old_h * 0.5
+        abs_h = max(1, int(round(old_h * scale_h)))
+        abs_y = int(round(center_y - abs_h * 0.5))
+        abs_y = max(0, min(H_fr - abs_h, abs_y))
 
     return mouth_rgba, abs_x, abs_y, abs_w, abs_h
 
@@ -598,7 +609,9 @@ def process_single(q: int,
                    conf_mouth: float,
                    mouth_padding_per_type: Dict[int, int] = None,
                    mouth_brightness_per_type: Dict[int, float] = None,
-                   use_rembg: bool = False) -> None:
+                   use_rembg: bool = False,
+                   use_open_for_half: bool = False,
+                   half_open_height_scale: float = 0.55) -> None:
     mt        = mouth_types[q]
     meta      = store.load_face_frame_meta(q)
     fg        = int(meta.get("face_group", 0))
@@ -658,7 +671,9 @@ def process_single(q: int,
                            mouth_type=mt,
                            mouth_padding_per_type=mouth_padding_per_type,
                            mouth_brightness_per_type=mouth_brightness_per_type,
-                           use_rembg=use_rembg)
+                           use_rembg=use_rembg,
+                           use_open_for_half=use_open_for_half,
+                           half_open_height_scale=half_open_height_scale)
 
     if result is None:
         store.save_mouth_frame(q, np.zeros((4, 4, 4), dtype=np.uint8), 0, 0, 0, 0)
@@ -719,7 +734,9 @@ def _worker_batch(worker_id: int,
                   conf_mouth: float,
                   mouth_padding_per_type: Dict[int, int] = None,
                   mouth_brightness_per_type: Dict[int, float] = None,
-                  use_rembg: bool = False) -> int:
+                  use_rembg: bool = False,
+                  use_open_for_half: bool = False,
+                  half_open_height_scale: float = 0.55) -> int:
     from ultralytics import YOLO
     completed = 0
     model = None
@@ -731,7 +748,9 @@ def _worker_batch(worker_id: int,
                 process_single(q, store, mouth_types, model, local,
                                upscale_crop_face, conf_mouth,
                                mouth_padding_per_type, mouth_brightness_per_type,
-                               use_rembg=use_rembg)
+                               use_rembg=use_rembg,
+                               use_open_for_half=use_open_for_half,
+                               half_open_height_scale=half_open_height_scale)
             except Exception as exc:
                 print(f"[F2-W{worker_id}] Erro frame {q}: {exc}")
                 try:
@@ -757,7 +776,9 @@ def run_phase2(store: DiskStore,
                conf_mouth: float = 0.1,
                mouth_padding_per_type: Dict[int, int] = None,
                mouth_brightness_per_type: Dict[int, float] = None,
-               use_rembg: bool = False) -> None:
+               use_rembg: bool = False,
+               use_open_for_half: bool = False,
+               half_open_height_scale: float = 0.55) -> None:
     n_workers = max(1, n_workers)
     if use_rembg:
         print("[F2] BEN2 ativo para remover pele do recorte da boca quando disponível.")
@@ -765,7 +786,9 @@ def run_phase2(store: DiskStore,
     print(f"\n[F2] Bocas por frame estabilizadas — modelo unico face+boca, {n_frames} frames, {n_workers} workers, "
           f"upscale=auto(min={upscale_crop_face:.1f}x) conf={conf_mouth} "
           f"padding={mouth_padding_per_type} brightness={mouth_brightness_per_type} "
-          f"BEN2={'on' if use_rembg else 'off'}...")
+          f"BEN2={'on' if use_rembg else 'off'} "
+          f"half_from_open={'on' if use_open_for_half else 'off'} "
+          f"half_height={half_open_height_scale:.2f}...")
 
     completed = 0
     log_step = max(1, n_frames // 10)
@@ -797,7 +820,8 @@ def run_phase2(store: DiskStore,
                 ex.submit(_worker_batch, worker_id, chunk, store, mouth_types,
                           detection_model_path, upscale_crop_face, conf_mouth,
                           mouth_padding_per_type, mouth_brightness_per_type,
-                          use_rembg): worker_id
+                          use_rembg, use_open_for_half,
+                          half_open_height_scale): worker_id
                 for worker_id, chunk in enumerate(chunks)
             }
             for future in as_completed(futures):

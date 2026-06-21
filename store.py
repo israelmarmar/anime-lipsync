@@ -266,7 +266,8 @@ class DiskStore:
         return self._hist_img(MOUTH_TYPE_NAMES[mt], fg)
 
     def save_history(self, mt, fg, arr, prompt, crop_w=0, crop_h=0,
-                     validation_ok=None, validation_msg=""):
+                     validation_ok=None, validation_msg="",
+                     generated_mouth_type=None):
         name = MOUTH_TYPE_NAMES[mt]
         self._save_webp_rgb(self._hist_img(name, fg), arr)
         meta = {
@@ -277,6 +278,10 @@ class DiskStore:
         if validation_ok is not None:
             meta["generated_mouth_valid"] = bool(validation_ok)
             meta["generated_mouth_validation"] = validation_msg
+        if generated_mouth_type is not None:
+            generated_mouth_type = int(generated_mouth_type)
+            meta["generated_mouth_type"] = generated_mouth_type
+            meta["generated_mouth_type_name"] = MOUTH_TYPE_NAMES[generated_mouth_type]
         atomic_write(self._hist_json(name, fg), jdumps(meta))
 
     # ── mouths ────────────────────────────────────────────────────────────────
