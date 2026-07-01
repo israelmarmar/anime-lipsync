@@ -1,168 +1,168 @@
 # Anime Lip Sync Custom Node
 
-Custom node para ComfyUI focado em lip sync de vídeos/animações estilo anime.
-O node recebe áudio e uma sequência de frames, detecta fonemas, gera variações de boca com diffusion e recompõe a boca no vídeo final.
+Custom node for ComfyUI focused on lip sync for anime-style videos/animations.
+The node receives audio and a sequence of frames, detects phonemes, generates mouth variations with diffusion, and recomposes the mouth into the final video.
 
-O node principal aparece como:
+The main node appears as:
 
 ```text
 LipSync / LipSync Pipeline V6
 ```
 
-Ele retorna:
+It returns:
 
-- `video_path`: caminho do MP4 final.
-- `video_info`: metadados do vídeo para integrações como VHS.
-- `debug_dir`: caminho da pasta de debug persistida quando `save_debug_folder=True`.
+- `video_path`: path to the final MP4.
+- `video_info`: video metadata for integrations such as VHS.
+- `debug_dir`: path to the persisted debug folder when `save_debug_folder=True`.
 
-## Visão Geral
+## Overview
 
-O pipeline trabalha em quatro fases:
+The pipeline works in four phases:
 
-1. **Fase 0 - detecção e preparação**
-   - Salva os frames de entrada em disco.
-   - Usa um único modelo YOLO para detectar:
-     - classe `0`: face
-     - classe `1`: boca
-   - Remove/inpinta a boca original quando `remove_mouth=True`.
-   - Salva bbox da face, máscara da boca e frames sem boca.
+1. **Phase 0 - detection and preparation**
+   - Saves the input frames to disk.
+   - Uses a single YOLO model to detect:
+     - class `0`: face
+     - class `1`: mouth
+   - Removes/inpaints the original mouth when `remove_mouth=True`.
+   - Saves the face bbox, mouth mask, and mouthless frames.
 
-2. **Fase 1 - geração das faces/bocas**
-   - Converte o áudio em fonemas usando Allosaurus.
-   - Mapeia fonemas para três tipos de boca:
+2. **Phase 1 - face/mouth generation**
+   - Converts audio into phonemes using Allosaurus.
+   - Maps phonemes to three mouth types:
      - `neutral_closed`
      - `half_open`
      - `fully_open`
-   - Agrupa faces por similaridade usando um mapa de **scribble**/contornos da face, mais preciso para variações de pose e linhas de anime.
-   - Usa `controlnet_aux.HEDdetector` em modo **scribble** para gerar o mapa de controle, com fallback para HEDPreprocessor, e então ControlNet + Z-Image Turbo/Qwen DiffSynth para gerar as faces com a boca correta.
+   - Groups faces by similarity using a face **scribble**/contour map, which is more accurate for pose variations and anime line art.
+   - Uses `controlnet_aux.HEDdetector` in **scribble** mode to generate the control map, with a fallback to HEDPreprocessor, then uses ControlNet + Z-Image Turbo/Qwen DiffSynth to generate faces with the correct mouth.
 
-3. **Fase 2 - recorte da boca gerada**
-   - Detecta a boca gerada frame a frame com o mesmo YOLO.
-   - Refina o alpha da boca:
-     - boca fechada preserva principalmente linhas dos lábios, evitando manchas de pele;
-     - bocas abertas usam máscara por cor, borda, elipse e `rembg` quando disponível.
-   - Suaviza temporalmente a posição/tamanho da boca em coordenadas relativas ao rosto, reduzindo tremedeira.
+3. **Phase 2 - generated mouth crop**
+   - Detects the generated mouth frame by frame with the same YOLO model.
+   - Refines the mouth alpha:
+     - closed mouths mainly preserve lip lines, avoiding skin smudges;
+     - open mouths use masks based on color, edge, ellipse, and `rembg` when available.
+   - Temporally smooths the mouth position/size in coordinates relative to the face, reducing jitter.
 
-4. **Fase 3 - composição**
-   - Recompõe o recorte RGBA da boca sobre o frame sem boca.
-   - Remove pixels de alpha fraco para reduzir halos e preenchimento de pele.
-   - Gera o MP4 final com o áudio original.
+4. **Phase 3 - composition**
+   - Recomposes the RGBA mouth crop over the mouthless frame.
+   - Removes weak-alpha pixels to reduce halos and skin fill.
+   - Generates the final MP4 with the original audio.
 
-## Modelo YOLO Único
+## Single YOLO Model
 
-Este node espera um único modelo YOLO treinado com duas classes:
+This node expects a single YOLO model trained with two classes:
 
 ```text
 0 = face
 1 = mouth
 ```
 
-Campo:
+Field:
 
 ```text
 detection_model_path
 ```
 
-O default tenta usar:
+The default tries to use:
 
 ```text
 best.pt
 ```
 
-Se esse arquivo não existir, usa:
+If that file does not exist, it uses:
 
 ```text
 best.pt
 ```
 
-dentro da pasta do custom node.
+inside the custom node folder.
 
-## Workflow de Exemplo
+## Example Workflow
 
-Há um workflow de exemplo em:
+There is an example workflow at:
 
 ```text
 examples/anime_lip_sync_v7.json
 ```
 
-Ele usa:
+It uses:
 
-- frames/imagens de entrada;
-- áudio;
-- `UNETLoader` para `z_image_turbo_bf16.safetensors`;
+- input frames/images;
+- audio;
+- `UNETLoader` for `z_image_turbo_bf16.safetensors`;
 - `CLIPLoader`;
 - `VAELoader`;
-- prompts externos opcionais para cada tipo de boca;
-- o node `LipSync Pipeline V6`.
+- optional external prompts for each mouth type;
+- the `LipSync Pipeline V6` node.
 
-## Entradas Principais
+## Main Inputs
 
-### Obrigatórias
+### Required
 
-- `audio`: áudio de entrada.
-- `images`: sequência de frames do vídeo.
-- `model`: modelo diffusion.
+- `audio`: input audio.
+- `images`: video frame sequence.
+- `model`: diffusion model.
 - `model_patch`: patch/controlnet model.
-- `clip`: CLIP usado nos prompts.
+- `clip`: CLIP used in prompts.
 - `vae`: VAE.
-- `detection_model_path`: YOLO único face+boca.
+- `detection_model_path`: single face+mouth YOLO model.
 
-### Gerais
+### General
 
-- `fps`: FPS do vídeo final e da análise de fonemas.
-- `source_fps`: FPS da sequência original de imagens.
-- `lang_id`: idioma para Allosaurus. O default `uni` costuma ser o mais flexível.
-- `sim_threshold`: threshold para separar grupos de face. Agora usa comparação por scribble.
-- `vram_safety_margin_mb`: margem de VRAM antes de lançar workers.
-- `enable_overlap`: processa F2/F3 em paralelo com a F1 quando possível.
-- `save_debug_folder`: copia a pasta temporária de trabalho para o output do ComfyUI e retorna o caminho em `debug_dir`.
-- `verify_generated_mouth`: valida com YOLO se a face gerada contém boca entre nariz e queixo; para `neutral_closed`, primeiro remove a pele com BEN2 e valida somente a espessura vertical do alpha resultante.
-- `mouth_regen_attempts`: número de rerenders KSampler quando a boca não é detectada na face gerada.
-- `use_open_for_half`: usa a geração `fully_open` nos frames `half_open` e reduz verticalmente apenas o recorte RGBA da boca.
-- `half_open_height_scale`: escala da altura da boca aberta usada como `half_open`; `0.55` mantém 55% da altura original.
-- `video_output_filename`: nome base do MP4 final.
+- `fps`: FPS for the final video and phoneme analysis.
+- `source_fps`: FPS of the original image sequence.
+- `lang_id`: language for Allosaurus. The default `uni` is usually the most flexible.
+- `sim_threshold`: threshold for separating face groups. It now uses scribble comparison.
+- `vram_safety_margin_mb`: VRAM margin before launching workers.
+- `enable_overlap`: processes F2/F3 in parallel with F1 when possible.
+- `save_debug_folder`: copies the temporary work folder to the ComfyUI output and returns its path in `debug_dir`.
+- `verify_generated_mouth`: uses YOLO to validate whether the generated face contains a mouth between the nose and chin; for `neutral_closed`, it first removes skin with BEN2 and validates only the vertical thickness of the resulting alpha.
+- `mouth_regen_attempts`: number of KSampler rerenders when the mouth is not detected in the generated face.
+- `use_open_for_half`: uses the `fully_open` generation on `half_open` frames and vertically shrinks only the mouth RGBA crop.
+- `half_open_height_scale`: scale of the open mouth height used as `half_open`; `0.55` keeps 55% of the original height.
+- `video_output_filename`: base name for the final MP4.
 
-### Detecção e Máscara
+### Detection and Mask
 
-- `mouth_conf`: confiança mínima para detecção da boca no YOLO.
-- `upscale_crop_face`: upscale mínimo do crop da face antes de detectar a boca.
-- `remove_mouth`: remove a boca original antes da diffusion.
-- `hed_detector_mode`: fonte do mapa HED/scribble para o ControlNet:
-  - `auto`: tenta `controlnet_aux.HEDdetector(scribble=True)` e cai para `HEDPreprocessor`.
-  - `controlnet_aux`: força `controlnet_aux.HEDdetector`; falha se a dependência/modelo não estiver disponível.
-  - `comfy_hed`: força o `HEDPreprocessor` do ComfyUI.
-- `mask_dilation`: expansão da máscara de inpaint da boca original.
-- `mask_blur`: suavização da máscara no inpaint.
-- `compose_feather_px`: feather da composição final.
+- `mouth_conf`: minimum confidence for YOLO mouth detection.
+- `upscale_crop_face`: minimum upscale for the face crop before detecting the mouth.
+- `remove_mouth`: removes the original mouth before diffusion.
+- `hed_detector_mode`: source of the HED/scribble map for ControlNet:
+  - `auto`: tries `controlnet_aux.HEDdetector(scribble=True)` and falls back to `HEDPreprocessor`.
+  - `controlnet_aux`: forces `controlnet_aux.HEDdetector`; fails if the dependency/model is not available.
+  - `comfy_hed`: forces ComfyUI's `HEDPreprocessor`.
+- `mask_dilation`: expansion of the original mouth inpaint mask.
+- `mask_blur`: mask smoothing for inpaint.
+- `compose_feather_px`: feathering for the final composition.
 
-### Ajustes por Tipo de Boca
+### Per-Mouth-Type Adjustments
 
 - `mouth_padding_closed`
 - `mouth_padding_half`
 - `mouth_padding_open`
 
-Use padding baixo para evitar carregar pele ao redor da boca. O pipeline já aplica padding automático pequeno por tipo.
+Use low padding to avoid carrying skin around the mouth. The pipeline already applies a small automatic padding per type.
 
 - `mouth_brightness_closed`
 - `mouth_brightness_half`
 - `mouth_brightness_open`
 
-Use para corrigir boca gerada escura/clara demais antes da composição.
+Use these to correct a generated mouth that is too dark or too bright before composition.
 
-### Florence-2 para Personagem Específico
+### Florence-2 for a Specific Character
 
-Quando há mais de um personagem no frame:
+When there is more than one character in the frame:
 
 - `enable_character_detect=True`
-- `character_query`: descrição do personagem, por exemplo `the girl with blue hair`
-- `character_margin`: margem ao redor do bbox detectado
+- `character_query`: character description, for example `the girl with blue hair`
+- `character_margin`: margin around the detected bbox
 - `florence_model_id`: default `microsoft/Florence-2-base`
 
-O Florence-2 localiza o personagem antes do YOLO, restringindo a busca da face.
+Florence-2 locates the character before YOLO, restricting the face search.
 
-## LoRAs e KSampler
+## LoRAs and KSampler
 
-Cada tipo de boca pode usar LoRA e parâmetros de sampling próprios:
+Each mouth type can use its own LoRA and sampling parameters:
 
 - closed:
   - `lora_closed_path`
@@ -185,62 +185,62 @@ Cada tipo de boca pode usar LoRA e parâmetros de sampling próprios:
   - `open_cfg`
   - `open_cn_strength`
 
-Também é possível fornecer `CONDITIONING` externo:
+You can also provide external `CONDITIONING`:
 
 - `cond_closed`
 - `cond_half`
 - `cond_open`
 
-Quando um conditioning externo é conectado, ele substitui o prompt interno daquele tipo de boca.
+When external conditioning is connected, it replaces the internal prompt for that mouth type.
 
-## Dicas de Ajuste
+## Tuning Tips
 
-### A boca está tremendo
+### The mouth is jittering
 
-- O pipeline já aplica suavização temporal relativa à face.
-- Se ainda tremer:
-  - aumente um pouco `mouth_conf` para evitar detecções instáveis;
-  - reduza `upscale_crop_face` se o detector estiver pegando detalhes demais;
-  - reduza mudanças bruscas nos prompts/LoRAs entre tipos de boca.
+- The pipeline already applies temporal smoothing relative to the face.
+- If it still jitters:
+  - slightly increase `mouth_conf` to avoid unstable detections;
+  - reduce `upscale_crop_face` if the detector is picking up too many details;
+  - reduce abrupt changes in prompts/LoRAs between mouth types.
 
-### A boca aberta está com pele ao redor
+### The open mouth has skin around it
 
-- Reduza `mouth_padding_half` e `mouth_padding_open`.
-- Aumente levemente `compose_feather_px` apenas se a borda estiver dura.
-- Evite brilho muito alto em `mouth_brightness_half/open`, porque ele pode clarear pele residual.
+- Reduce `mouth_padding_half` and `mouth_padding_open`.
+- Slightly increase `compose_feather_px` only if the edge is too harsh.
+- Avoid very high brightness in `mouth_brightness_half/open`, because it can brighten residual skin.
 
-### A boca fechada aparece como uma mancha de pele
+### The closed mouth appears as a skin smudge
 
-- Use `mouth_padding_closed=0` ou um valor baixo.
-- A máscara de boca fechada preserva principalmente linhas; se a linha sumir, aumente pouco a força/qualidade da LoRA de boca fechada em vez de aumentar padding.
+- Use `mouth_padding_closed=0` or a low value.
+- The closed-mouth mask mainly preserves lines; if the line disappears, slightly increase the closed-mouth LoRA strength/quality instead of increasing padding.
 
-### O personagem muda ou troca de rosto
+### The character changes or the face swaps
 
-- Ajuste `sim_threshold`.
-- Valores mais altos criam mais grupos de face.
-- Valores mais baixos reutilizam mais faces geradas.
-- A comparação usa scribble/contornos, então mudanças de pose e linhas faciais contam mais que cor.
+- Adjust `sim_threshold`.
+- Higher values create more face groups.
+- Lower values reuse more generated faces.
+- The comparison uses scribble/contours, so pose changes and facial lines matter more than color.
 
-### Mais de um personagem no vídeo
+### More than one character in the video
 
-Ative Florence-2 e preencha `character_query`. Sem isso, o YOLO pode escolher a face com maior confiança no frame.
+Enable Florence-2 and fill in `character_query`. Without this, YOLO may choose the face with the highest confidence in the frame.
 
-## Dependências
+## Dependencies
 
-Além do ComfyUI e dos nodes usados pelo workflow, o pipeline usa:
+In addition to ComfyUI and the nodes used by the workflow, the pipeline uses:
 
-- `ultralytics` para YOLO.
+- `ultralytics` for YOLO.
 - `opencv-python` / `cv2`.
 - `numpy`.
 - `torch`.
 - `Pillow`.
-- `allosaurus` para fonemas.
-- `controlnet_aux` opcional/recomendado para HEDdetector em modo scribble.
-- `skimage` opcional para SSIM.
-- `rembg` opcional para refino de alpha das bocas abertas.
-- `transformers`, `timm`, `einops` se usar Florence-2.
+- `allosaurus` for phonemes.
+- `controlnet_aux` optional/recommended for HEDdetector in scribble mode.
+- `skimage` optional for SSIM.
+- `rembg` optional for open-mouth alpha refinement.
+- `transformers`, `timm`, `einops` if using Florence-2.
 
-O node também espera que os nodes ComfyUI abaixo existam:
+The node also expects the following ComfyUI nodes to exist:
 
 - `HEDPreprocessor`
 - `QwenImageDiffsynthControlnet`
@@ -249,25 +249,25 @@ O node também espera que os nodes ComfyUI abaixo existam:
 - `KSampler`
 - `CLIPTextEncode`
 
-## Estrutura dos Arquivos
+## File Structure
 
-- `node.py`: entrada do custom node e orquestração geral.
-- `phase0.py`: YOLO face+boca, inpaint da boca original e bbox da face.
-- `phase1.py`: fonemas, agrupamento por scribble, HED/ControlNet/diffusion.
-- `phase2.py`: detecção/recorte da boca gerada, alpha e suavização temporal.
-- `phase3.py`: composição final e workers de overlap.
-- `phonemes.py`: integração Allosaurus.
-- `character_detect.py`: seleção de personagem com Florence-2.
-- `store.py`: armazenamento temporário em disco.
-- `constants.py`: prompts, tipos de boca e mapeamento fonema -> boca.
-- `examples/anime_lip_sync_v7.json`: workflow de exemplo.
+- `node.py`: custom node entry point and general orchestration.
+- `phase0.py`: YOLO face+mouth, original mouth inpaint, and face bbox.
+- `phase1.py`: phonemes, scribble-based grouping, HED/ControlNet/diffusion.
+- `phase2.py`: generated mouth detection/crop, alpha, and temporal smoothing.
+- `phase3.py`: final composition and overlap workers.
+- `phonemes.py`: Allosaurus integration.
+- `character_detect.py`: character selection with Florence-2.
+- `store.py`: temporary on-disk storage.
+- `constants.py`: prompts, mouth types, and phoneme -> mouth mapping.
+- `examples/anime_lip_sync_v7.json`: example workflow.
 
-## Saída
+## Output
 
-O vídeo final é salvo no diretório de output do ComfyUI com o nome definido por:
+The final video is saved in the ComfyUI output directory with the name defined by:
 
 ```text
 video_output_filename
 ```
 
-O node retorna o caminho do MP4 e as informações de vídeo para a UI.
+The node returns the MP4 path and video information for the UI.
