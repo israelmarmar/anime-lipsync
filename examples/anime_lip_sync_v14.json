@@ -1,8 +1,8 @@
 {
   "id": "d78fdd86-d27e-4c18-adae-5dedafbca8f3",
   "revision": 0,
-  "last_node_id": 30,
-  "last_link_id": 141,
+  "last_node_id": 31,
+  "last_link_id": 152,
   "nodes": [
     {
       "id": 14,
@@ -12,8 +12,8 @@
         822.718795275268
       ],
       "size": [
-        259.7607872223716,
-        120.51356293985839
+        259.76666259765625,
+        140
       ],
       "flags": {},
       "order": 0,
@@ -27,7 +27,7 @@
             4,
             5,
             6,
-            133
+            146
           ]
         }
       ],
@@ -58,8 +58,8 @@
         1169.491373279649
       ],
       "size": [
-        210,
-        58
+        225,
+        112
       ],
       "flags": {},
       "order": 1,
@@ -95,8 +95,8 @@
         597.5278429950316
       ],
       "size": [
-        270.43862281383883,
-        63.70175686923005
+        270.4333190917969,
+        104
       ],
       "flags": {},
       "order": 2,
@@ -107,7 +107,7 @@
           "name": "MODEL_PATCH",
           "type": "MODEL_PATCH",
           "links": [
-            132
+            145
           ]
         }
       ],
@@ -134,8 +134,8 @@
         112.55767351082265
       ],
       "size": [
-        222.798828125,
-        136
+        265.4333190917969,
+        152
       ],
       "flags": {},
       "order": 3,
@@ -147,7 +147,7 @@
           "type": "AUDIO",
           "links": [
             18,
-            129
+            142
           ]
         }
       ],
@@ -178,8 +178,8 @@
         444.28839373126294
       ],
       "size": [
-        242.2137908935547,
-        286
+        242.21665954589844,
+        376
       ],
       "flags": {},
       "order": 13,
@@ -203,7 +203,7 @@
           "widget": {
             "name": "video"
           },
-          "link": 128
+          "link": 152
         }
       ],
       "outputs": [
@@ -282,8 +282,8 @@
         333.80451691507477
       ],
       "size": [
-        344.56146211382975,
-        112.78948709384235
+        344.5666809082031,
+        112.78334045410156
       ],
       "flags": {},
       "order": 4,
@@ -294,7 +294,7 @@
           "name": "MODEL",
           "type": "MODEL",
           "links": [
-            131
+            144
           ]
         }
       ],
@@ -323,8 +323,8 @@
         280.4997422444343
       ],
       "size": [
-        210,
-        82
+        225,
+        128
       ],
       "flags": {},
       "order": 12,
@@ -333,7 +333,7 @@
         {
           "name": "anything",
           "type": "*",
-          "link": 127
+          "link": 151
         }
       ],
       "outputs": [],
@@ -360,8 +360,8 @@
         222.30080801542329
       ],
       "size": [
-        702.2221642554264,
-        1342.0951536293355
+        702.2166748046875,
+        1442.3499755859375
       ],
       "flags": {},
       "order": 14,
@@ -422,13 +422,13 @@
           "hidden": false,
           "paused": false,
           "params": {
-            "filename": "AnimateDiff_00279-audio.mp4",
+            "filename": "AnimateDiff_00290-audio.mp4",
             "subfolder": "",
             "type": "output",
             "format": "video/h264-mp4",
             "frame_rate": 12,
-            "workflow": "AnimateDiff_00279.png",
-            "fullpath": "/disco3/ComfyUI/output/AnimateDiff_00279-audio.mp4"
+            "workflow": "AnimateDiff_00290.png",
+            "fullpath": "/disco3/ComfyUI/output/AnimateDiff_00290-audio.mp4"
           }
         }
       }
@@ -459,7 +459,7 @@
           "name": "CONDITIONING",
           "type": "CONDITIONING",
           "links": [
-            135
+            148
           ]
         }
       ],
@@ -488,8 +488,8 @@
         53.472703347048935
       ],
       "size": [
-        259.8983612060547,
-        673.580492947445
+        259.8999938964844,
+        753.8333129882812
       ],
       "flags": {},
       "order": 5,
@@ -575,217 +575,6 @@
       }
     },
     {
-      "id": 30,
-      "type": "LipSyncPipelineV6",
-      "pos": [
-        4016.892519455063,
-        615.6673415822825
-      ],
-      "size": [
-        321.8333282470703,
-        1562
-      ],
-      "flags": {},
-      "order": 11,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "audio",
-          "type": "AUDIO",
-          "link": 129
-        },
-        {
-          "name": "images",
-          "type": "IMAGE",
-          "link": 141
-        },
-        {
-          "name": "model",
-          "type": "MODEL",
-          "link": 131
-        },
-        {
-          "name": "model_patch",
-          "type": "MODEL_PATCH",
-          "link": 132
-        },
-        {
-          "name": "clip",
-          "type": "CLIP",
-          "link": 133
-        },
-        {
-          "name": "vae",
-          "type": "VAE",
-          "link": 134
-        },
-        {
-          "name": "cond_closed",
-          "shape": 7,
-          "type": "CONDITIONING",
-          "link": 135
-        },
-        {
-          "name": "cond_half",
-          "shape": 7,
-          "type": "CONDITIONING",
-          "link": 136
-        },
-        {
-          "name": "cond_open",
-          "shape": 7,
-          "type": "CONDITIONING",
-          "link": 137
-        }
-      ],
-      "outputs": [
-        {
-          "name": "video_path",
-          "type": "STRING",
-          "links": [
-            127,
-            128
-          ]
-        },
-        {
-          "name": "video_info",
-          "type": "VHS_VIDEOINFO",
-          "links": null
-        },
-        {
-          "name": "debug_dir",
-          "type": "STRING",
-          "links": null
-        }
-      ],
-      "properties": {
-        "aux_id": "israelmarmar/anime-lipsync",
-        "ver": "e0f1d7c5af154ba678e54506ed76b936df6c8087",
-        "Node name for S&R": "LipSyncPipelineV6",
-        "ue_properties": {
-          "version": "7.0.1",
-          "widget_ue_connectable": {
-            "detection_model_path": true,
-            "fps": true,
-            "source_fps": true,
-            "lang_id": true,
-            "sim_threshold": true,
-            "motion_variance_factor": true,
-            "mask_dilation": true,
-            "mask_blur": true,
-            "vram_safety_margin_mb": true,
-            "compose_feather_px": true,
-            "enable_overlap": true,
-            "use_rembg": true,
-            "upscale_crop_face": true,
-            "mouth_conf": true,
-            "remove_mouth": true,
-            "save_debug_folder": true,
-            "verify_generated_mouth": true,
-            "mouth_regen_attempts": true,
-            "hed_detector_mode": true,
-            "mouth_padding_closed": true,
-            "mouth_padding_half": true,
-            "mouth_padding_open": true,
-            "mouth_brightness_closed": true,
-            "mouth_brightness_half": true,
-            "mouth_brightness_open": true,
-            "video_output_filename": true,
-            "enable_character_detect": true,
-            "character_query": true,
-            "character_margin": true,
-            "florence_model_id": true,
-            "lora_closed_path": true,
-            "lora_closed_strength_model": true,
-            "lora_closed_strength_clip": true,
-            "lora_half_path": true,
-            "lora_half_strength_model": true,
-            "lora_half_strength_clip": true,
-            "lora_open_path": true,
-            "lora_open_strength_model": true,
-            "lora_open_strength_clip": true,
-            "closed_steps": true,
-            "closed_denoise": true,
-            "closed_cfg": true,
-            "closed_cn_strength": true,
-            "closed_sampler": true,
-            "closed_scheduler": true,
-            "half_steps": true,
-            "half_denoise": true,
-            "half_cfg": true,
-            "half_cn_strength": true,
-            "half_sampler": true,
-            "half_scheduler": true,
-            "open_steps": true,
-            "open_denoise": true,
-            "open_cfg": true,
-            "open_cn_strength": true,
-            "open_sampler": true,
-            "open_scheduler": true
-          }
-        }
-      },
-      "widgets_values": [
-        "/disco3/anime_mouth_yolo/best.pt",
-        12,
-        12,
-        "ipa",
-        0.92,
-        0.001,
-        8,
-        5,
-        1024,
-        2,
-        true,
-        true,
-        2,
-        0.1,
-        true,
-        true,
-        false,
-        4,
-        "auto",
-        0,
-        0,
-        0,
-        1,
-        1,
-        1,
-        "lipsync_output",
-        false,
-        "",
-        0.05,
-        "microsoft/Florence-2-base",
-        "closed_mouth_z_image_turbo_lora.safetensors",
-        1,
-        1,
-        "half_open_z_image_turbo_lora.safetensors",
-        1,
-        1,
-        "full_open_z_image_turbo_lora.safetensors",
-        1,
-        1,
-        4,
-        0.6,
-        1.2,
-        0.6,
-        "res_multistep",
-        "simple",
-        4,
-        0.8,
-        1,
-        0.6,
-        "res_multistep",
-        "simple",
-        4,
-        0.9,
-        1.2,
-        0.6,
-        "res_multistep",
-        "simple"
-      ]
-    },
-    {
       "id": 13,
       "type": "CLIPTextEncode",
       "pos": [
@@ -811,7 +600,7 @@
           "name": "CONDITIONING",
           "type": "CONDITIONING",
           "links": [
-            137
+            150
           ]
         }
       ],
@@ -840,8 +629,8 @@
         1163.3953005852356
       ],
       "size": [
-        413.35670757158323,
-        318.67835378579184
+        413.3500061035156,
+        318.6833190917969
       ],
       "flags": {},
       "order": 9,
@@ -858,7 +647,7 @@
           "name": "CONDITIONING",
           "type": "CONDITIONING",
           "links": [
-            136
+            149
           ]
         }
       ],
@@ -888,7 +677,7 @@
       ],
       "size": [
         270,
-        58
+        80
       ],
       "flags": {},
       "order": 6,
@@ -899,7 +688,7 @@
           "name": "VAE",
           "type": "VAE",
           "links": [
-            134
+            147
           ]
         }
       ],
@@ -922,12 +711,12 @@
       "id": 1,
       "type": "VHS_LoadVideo",
       "pos": [
-        2552.194876724498,
-        348.2798542701708
+        2017.926573861154,
+        900.9136300444422
       ],
       "size": [
-        256.6499938964844,
-        669.2188071640047
+        568.8499755859375,
+        1204.9166259765625
       ],
       "flags": {},
       "order": 7,
@@ -951,7 +740,7 @@
           "name": "IMAGE",
           "type": "IMAGE",
           "links": [
-            141
+            143
           ]
         },
         {
@@ -989,7 +778,7 @@
         }
       },
       "widgets_values": {
-        "video": "000001_schoolboy_happy_kimono.mp4",
+        "video": "000002_schoolgirl_happy_streetwear_outfit.mp4",
         "force_rate": 0,
         "custom_width": 0,
         "custom_height": 0,
@@ -1001,7 +790,7 @@
           "hidden": false,
           "paused": false,
           "params": {
-            "filename": "000001_schoolboy_happy_kimono.mp4",
+            "filename": "000002_schoolgirl_happy_streetwear_outfit.mp4",
             "type": "input",
             "format": "video/mp4",
             "force_rate": 0,
@@ -1013,6 +802,160 @@
           }
         }
       }
+    },
+    {
+      "id": 31,
+      "type": "LipSyncPipelineV6",
+      "pos": [
+        4023.0097189281455,
+        566.9203882253514
+      ],
+      "size": [
+        321.8333435058594,
+        2236
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 142
+        },
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 143
+        },
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 144
+        },
+        {
+          "name": "model_patch",
+          "type": "MODEL_PATCH",
+          "link": 145
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 146
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 147
+        },
+        {
+          "name": "cond_closed",
+          "shape": 7,
+          "type": "CONDITIONING",
+          "link": 148
+        },
+        {
+          "name": "cond_half",
+          "shape": 7,
+          "type": "CONDITIONING",
+          "link": 149
+        },
+        {
+          "name": "cond_open",
+          "shape": 7,
+          "type": "CONDITIONING",
+          "link": 150
+        }
+      ],
+      "outputs": [
+        {
+          "name": "video_path",
+          "type": "STRING",
+          "links": [
+            151,
+            152
+          ]
+        },
+        {
+          "name": "video_info",
+          "type": "VHS_VIDEOINFO",
+          "links": null
+        },
+        {
+          "name": "debug_dir",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "aux_id": "israelmarmar/anime-lipsync",
+        "ver": "56e79316418e9c998f31a99dd3824f7c73c347d8",
+        "Node name for S&R": "LipSyncPipelineV6",
+        "ue_properties": {
+          "widget_ue_connectable": {}
+        }
+      },
+      "widgets_values": [
+        "/disco3/anime_mouth_yolo/best.pt",
+        12,
+        12,
+        "ipa",
+        0.85,
+        0.001,
+        8,
+        5,
+        1024,
+        2,
+        true,
+        true,
+        2,
+        0.1,
+        true,
+        false,
+        true,
+        2,
+        false,
+        0.55,
+        "auto",
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        "lipsync_output",
+        false,
+        "",
+        0.05,
+        "microsoft/Florence-2-base",
+        "closed_mouth_z_image_turbo_lora.safetensors",
+        1,
+        1,
+        "half_open_z_image_turbo_lora.safetensors",
+        1,
+        1,
+        "full_open_z_image_turbo_lora.safetensors",
+        1,
+        1,
+        4,
+        0.55,
+        1.2,
+        0.6,
+        "res_multistep",
+        "simple",
+        4,
+        0.8,
+        1,
+        0.6,
+        "res_multistep",
+        "simple",
+        4,
+        0.9,
+        1.2,
+        0.6,
+        "res_multistep",
+        "simple"
+      ]
     }
   ],
   "links": [
@@ -1057,92 +1000,92 @@
       "AUDIO"
     ],
     [
-      127,
-      30,
+      142,
+      7,
+      0,
+      31,
+      0,
+      "AUDIO"
+    ],
+    [
+      143,
+      1,
+      0,
+      31,
+      1,
+      "IMAGE"
+    ],
+    [
+      144,
+      8,
+      0,
+      31,
+      2,
+      "MODEL"
+    ],
+    [
+      145,
+      9,
+      0,
+      31,
+      3,
+      "MODEL_PATCH"
+    ],
+    [
+      146,
+      14,
+      0,
+      31,
+      4,
+      "CLIP"
+    ],
+    [
+      147,
+      10,
+      0,
+      31,
+      5,
+      "VAE"
+    ],
+    [
+      148,
+      11,
+      0,
+      31,
+      6,
+      "CONDITIONING"
+    ],
+    [
+      149,
+      12,
+      0,
+      31,
+      7,
+      "CONDITIONING"
+    ],
+    [
+      150,
+      13,
+      0,
+      31,
+      8,
+      "CONDITIONING"
+    ],
+    [
+      151,
+      31,
       0,
       19,
       0,
       "STRING"
     ],
     [
-      128,
-      30,
+      152,
+      31,
       0,
       15,
       2,
       "STRING"
-    ],
-    [
-      129,
-      7,
-      0,
-      30,
-      0,
-      "AUDIO"
-    ],
-    [
-      131,
-      8,
-      0,
-      30,
-      2,
-      "MODEL"
-    ],
-    [
-      132,
-      9,
-      0,
-      30,
-      3,
-      "MODEL_PATCH"
-    ],
-    [
-      133,
-      14,
-      0,
-      30,
-      4,
-      "CLIP"
-    ],
-    [
-      134,
-      10,
-      0,
-      30,
-      5,
-      "VAE"
-    ],
-    [
-      135,
-      11,
-      0,
-      30,
-      6,
-      "CONDITIONING"
-    ],
-    [
-      136,
-      12,
-      0,
-      30,
-      7,
-      "CONDITIONING"
-    ],
-    [
-      137,
-      13,
-      0,
-      30,
-      8,
-      "CONDITIONING"
-    ],
-    [
-      141,
-      1,
-      0,
-      30,
-      1,
-      "IMAGE"
     ]
   ],
   "groups": [],
@@ -1151,13 +1094,13 @@
     "ue_links": [],
     "links_added_by_ue": [],
     "ds": {
-      "scale": 0.338091660405711,
+      "scale": 0.7247295000000019,
       "offset": [
-        -1123.843335969044,
-        753.917578958046
+        -4495.24441989956,
+        -341.49053088971857
       ]
     },
-    "frontendVersion": "1.43.18",
+    "frontendVersion": "1.45.19",
     "VHS_latentpreview": false,
     "VHS_latentpreviewrate": 0,
     "VHS_MetadataImage": true,
