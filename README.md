@@ -67,8 +67,6 @@ The default tries to use:
 
 [https://huggingface.co/israelmarmar/anime_face_mouth/blob/main/anime_face_mouth.pt](https://huggingface.co/israelmarmar/anime_face_mouth/blob/main/anime_face_mouth.pt)
 
-inside the custom node folder.
-
 ## Example Workflow
 
 There is an example workflow at:
