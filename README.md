@@ -65,15 +65,7 @@ detection_model_path
 
 The default tries to use:
 
-```text
-best.pt
-```
-
-If that file does not exist, it uses:
-
-```text
-best.pt
-```
+[https://huggingface.co/israelmarmar/anime_face_mouth/blob/main/anime_face_mouth.pt](https://huggingface.co/israelmarmar/anime_face_mouth/blob/main/anime_face_mouth.pt)
 
 inside the custom node folder.
 
@@ -82,7 +74,7 @@ inside the custom node folder.
 There is an example workflow at:
 
 ```text
-examples/anime_lip_sync_v7.json
+examples/anime_lip_sync_v14.json
 ```
 
 It uses:
